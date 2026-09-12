@@ -30,6 +30,7 @@ env:
 jobs:
   pin:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -68,6 +69,7 @@ jobs:
           import json
           import os
           import re
+          import urllib.parse
           import urllib.request
 
           feeds = {
@@ -90,6 +92,8 @@ jobs:
               url = payload["downloadUrl"]
               if not url.startswith("https://") or not url.endswith(".AppImage"):
                   raise SystemExit("feed %s has a non-AppImage URL" % feed)
+              if urllib.parse.urlsplit(url).hostname != "downloads.cursor.com":
+                  raise SystemExit("feed %s has an off-host artifact URL" % feed)
               with open(os.path.join(scratch, arch + ".url"), "w") as handle:
                   handle.write(url + "\n")
               if first is None:
@@ -203,7 +207,6 @@ jobs:
         if: ${{ steps.write.outputs.changed == 'true' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          REPO_SLUG: ${{ github.repository }}
         run: |
           set -euo pipefail
           PIN_VERSION="$(cat "${RUNNER_TEMP}/pin/version")"
@@ -230,8 +233,7 @@ jobs:
           git add -- data/pins.yml io.github.viniciosrab.GrokBot.yml
           git checkout -B "${PIN_BRANCH}"
           git commit -m "chore(pin): sand ${PIN_VERSION}" -- data/pins.yml io.github.viniciosrab.GrokBot.yml
-          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${REPO_SLUG}.git"
-          git push origin "${PIN_BRANCH}"
+          git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 -w0)" push origin "${PIN_BRANCH}"
 
       - name: Open the pin branch PR
         if: ${{ steps.write.outputs.changed == 'true' }}

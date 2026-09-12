@@ -20,6 +20,7 @@ import os
 import re
 import shlex
 import unittest
+from urllib.parse import urlsplit
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PINS_PATH = os.path.join(REPO_ROOT, "data", "pins.yml")
@@ -126,6 +127,14 @@ def is_appimage_artifact_url(url: object) -> bool:
     return True
 
 
+def artifact_host_is_pinned(url: object) -> bool:
+    """Accept only artifact URLs whose hostname exactly matches the pin."""
+    try:
+        return urlsplit(url).hostname == ARTIFACT_HOST
+    except Exception:
+        return False
+
+
 def validate_pins_schema(pins: dict) -> list:
     """Return a list of schema violations (empty means valid)."""
     errors = []
@@ -149,7 +158,7 @@ def validate_pins_schema(pins: dict) -> list:
         url = entry.get("url", "")
         if not is_appimage_artifact_url(url):
             errors.append(f"{arch}: url must be an AppImage artifact URL")
-        elif ARTIFACT_HOST not in str(url):
+        elif not artifact_host_is_pinned(url):
             errors.append(f"{arch}: url must stay on {ARTIFACT_HOST}")
         if not is_hex_digest(entry.get("sha256")):
             errors.append(f"{arch}: sha256 must be a 64-char hex Source Checksum")
@@ -375,6 +384,21 @@ class ArtifactUrlContractTests(unittest.TestCase):
         ):
             self.assertFalse(is_appimage_artifact_url(bad), bad)
 
+    def test_artifact_host_requires_exact_hostname(self):
+        self.assertTrue(artifact_host_is_pinned(self.GOOD))
+        self.assertFalse(
+            artifact_host_is_pinned("https://downloads.cursor.com.evil/x.AppImage")
+        )
+        self.assertFalse(artifact_host_is_pinned(None))
+        self.assertFalse(
+            is_appimage_artifact_url("http://downloads.cursor.com/x.AppImage")
+        )
+        self.assertFalse(
+            is_appimage_artifact_url(
+                "https://downloads.cursor.com/x.AppImage?sig=abc"
+            )
+        )
+
 
 class GitSafetyHelperTests(unittest.TestCase):
     WORKSPACE = "/github/workspace"
@@ -560,15 +584,19 @@ class PinWorkflowContractTests(unittest.TestCase):
 
     def test_push_goes_to_origin_pin_branch_only(self):
         text = read_text(PIN_WORKFLOW_PATH)
+        self.assertNotIn("remote set-url", text)
         push_lines = [
             line.strip()
             for line in text.splitlines()
-            if re.match(r"\s*git\s+push\b", line)
+            if re.match(r"\s*git\s+", line) and re.search(r"\bpush\b", line)
         ]
         self.assertTrue(push_lines, "pin.yml must push the pin branch")
         for line in push_lines:
+            self.assertIn("extraheader", line)
             self.assertIn("origin", line)
-            self.assertNotIn(":", line.split("push", 1)[1].replace("${", ""))
+            self.assertIn("push origin", line)
+            self.assertIn('"${PIN_BRANCH}"', line)
+            self.assertNotIn("HEAD:", line)
             self.assertNotIn("--force", line)
         self.assertRegex(text, r'PIN_BRANCH="pin/sand-')
 

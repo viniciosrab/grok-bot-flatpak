@@ -20,11 +20,19 @@ modules:
   # Chromium/Electron sandbox bridge. Built as a module on the KDE runtime;
   # the Electron BaseApp is intentionally not used as a base.
   - name: zypak
-    buildsystem: meson
+    buildsystem: simple
     sources:
       - type: git
         url: https://github.com/refi64/zypak.git
         tag: v2025.09
+        commit: 693a71c5ffa80ec9c9ce2ae03b1ccc493c698e53
+      - type: git
+        url: https://github.com/refi64/nickle.git
+        commit: 0ac7f5dbf659caa8d1d45cb57e942f2bc565da1e
+        path: nickle
+    build-commands:
+      - make
+      - make install FLATPAK_DEST=/app
 
   # Mandatory KDE tray companion (KF6 KStatusNotifierItem). The desktop
   # entry launches this binary; it gates on StatusNotifierWatcher and
@@ -56,7 +64,9 @@ modules:
     build-commands:
       - |
         set -euo pipefail
-        unsquashfs -d grok-bot-unpacked Grok_Bot_*.AppImage
+        chmod +x Grok_Bot_*.AppImage
+        ./Grok_Bot_*.AppImage --appimage-extract
+        mv squashfs-root grok-bot-unpacked
         test -d grok-bot-unpacked/usr/share/icons/hicolor || { echo "missing vendor hicolor tree" >&2; exit 1; }
         test -f grok-bot-unpacked/usr/share/icons/hicolor/512x512/apps/grok-bot.png || { echo "missing Official Grok Bot Icon" >&2; exit 1; }
       - |

@@ -81,7 +81,7 @@ jobs:
         run: |
           set -euo pipefail
           set +e
-          timeout 60 flatpak-builder --run build-dir io.github.viniciosrab.GrokBot.yml /app/bin/grok-bot-companion >launch.log 2>&1
+          timeout 60 dbus-run-session -- flatpak-builder --run build-dir io.github.viniciosrab.GrokBot.yml /app/bin/grok-bot-companion >launch.log 2>&1
           RC=$?
           set -e
           cat launch.log
@@ -198,7 +198,7 @@ jobs:
         run: |
           set -euo pipefail
           set +e
-          timeout 60 flatpak-builder --run build-dir io.github.viniciosrab.GrokBot.yml /app/bin/grok-bot-companion >launch.log 2>&1
+          timeout 60 dbus-run-session -- flatpak-builder --run build-dir io.github.viniciosrab.GrokBot.yml /app/bin/grok-bot-companion >launch.log 2>&1
           RC=$?
           set -e
           cat launch.log

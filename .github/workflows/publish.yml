@@ -123,15 +123,26 @@ jobs:
       - name: Tag the release for audit and rollback
         env:
           GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
           VERSION="$(grep '^version:' data/pins.yml | awk '{print $2}')"
           test -n "${VERSION}" || { echo "missing pinned version" >&2; exit 1; }
           if git rev-parse "flatpak/${VERSION}" >/dev/null 2>&1; then
+            TAG_SHA="$(git rev-list -n 1 "flatpak/${VERSION}")"
+            if [ "${TAG_SHA}" != "${HEAD_SHA}" ]; then
+              echo "tag flatpak/${VERSION} points at ${TAG_SHA}, not the validated ${HEAD_SHA}; refusing silent reuse" >&2
+              exit 1
+            fi
             echo "tag flatpak/${VERSION} already exists locally; skipping create"
           elif git ls-remote --exit-code --tags origin "flatpak/${VERSION}" >/dev/null 2>&1; then
-            echo "tag flatpak/${VERSION} already exists on origin; skipping create"
             git fetch --tags origin "flatpak/${VERSION}" || true
+            TAG_SHA="$(git rev-list -n 1 "flatpak/${VERSION}")"
+            if [ "${TAG_SHA}" != "${HEAD_SHA}" ]; then
+              echo "tag flatpak/${VERSION} points at ${TAG_SHA}, not the validated ${HEAD_SHA}; refusing silent reuse" >&2
+              exit 1
+            fi
+            echo "tag flatpak/${VERSION} already exists on origin; skipping create"
           else
             git tag "flatpak/${VERSION}"
             git push origin "flatpak/${VERSION}"

@@ -2,13 +2,13 @@
 
 ## Current state
 
-Implementation of change `package-unofficial-grok-bot` is in progress in
-the worktree and uncommitted. The Flatpak manifest, KF6 tray companion,
-Source Checksum pins, validation and publication workflows, test runner,
-and CTest wiring all exist; `python3 tools/test.py` passes (54 unittest
-checks plus the CTest bootstrap). X3 graphical launch proof remains
-unproven (see below). `strict_tdd` remains `false` per the
-change contract. No commits or pull requests were created.
+Implementation of change `package-unofficial-grok-bot` is committed on
+branch `feat/package-unofficial-grok-bot`; PR #2 is open to `main`.
+The Flatpak manifest, KF6 tray companion, Source Checksum pins,
+validation and publication workflows, test runner, and CTest wiring all
+exist; `python3 tools/test.py` passes (58 unittest checks plus the
+CTest bootstrap). X3 graphical launch proof remains unproven (see
+below). `strict_tdd` remains `false` per the change contract.
 
 ## Read first
 
@@ -59,10 +59,9 @@ name these secrets only and fail closed while any is missing:
 
 ## Worktree notes
 
-- `CONTEXT.md`, `docs/adr/`, and this handoff are tracked. The implementation files from change `package-unofficial-grok-bot` are currently uncommitted.
+- Work is on branch `feat/package-unofficial-grok-bot` with the implementation committed; PR #2 targets `main`.
 - `.codegraph/` was initialized during the design session and is untracked.
 - `.atl/` is unrelated and ignored; do not modify or remove it without an explicit request.
-- No commits or pull requests were created.
 
 ## Suggested skills
 

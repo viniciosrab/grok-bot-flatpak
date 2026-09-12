@@ -443,6 +443,11 @@ class AtomicContentContractTests(unittest.TestCase):
         self.assertNotIn("sed -n '2p'", text)
         self.assertIn('grep -Fxv "flatpak/${VERSION}"', text)
 
+    def test_publish_tag_step_refuses_stale_tags(self):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        self.assertIn("rev-list", text)
+        self.assertIn("refusing silent reuse", text)
+
     def test_workflows_use_sudo_for_flatpak_system_ops(self):
         for path in (VALIDATE_WORKFLOW_PATH, PUBLISH_WORKFLOW_PATH):
             with self.subTest(path=path):

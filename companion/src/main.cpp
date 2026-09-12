@@ -19,6 +19,7 @@
 #include <QApplication>
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
+#include <QFileInfo>
 #include <QProcess>
 #include <QStandardPaths>
 #include <QStringList>
@@ -85,7 +86,9 @@ private slots:
     {
         if (m_child->state() != QProcess::NotRunning) {
             // Second exec: Electron single-instance focuses the window.
-            QProcess::startDetached(m_electronCommand, {});
+            if (!QProcess::startDetached(m_electronCommand, {})) {
+                qWarning("grok-bot-companion: failed to reveal the running instance: %s", qPrintable(m_electronCommand));
+            }
             return;
         }
         startChild();
@@ -177,6 +180,10 @@ int main(int argc, char **argv)
     const QString electronCommand = resolveElectronCommand(app);
     if (electronCommand.isEmpty()) {
         qWarning("grok-bot-companion: no Electron command configured");
+        return 1;
+    }
+    if (!QFileInfo::exists(electronCommand) || !QFileInfo(electronCommand).isExecutable()) {
+        qWarning("grok-bot-companion: Electron command is not executable: %s", qPrintable(electronCommand));
         return 1;
     }
 
