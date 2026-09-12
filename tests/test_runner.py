@@ -443,6 +443,17 @@ class AtomicContentContractTests(unittest.TestCase):
         self.assertNotIn("sed -n '2p'", text)
         self.assertIn('grep -Fxv "flatpak/${VERSION}"', text)
 
+    def test_workflows_use_sudo_for_flatpak_system_ops(self):
+        for path in (VALIDATE_WORKFLOW_PATH, PUBLISH_WORKFLOW_PATH):
+            with self.subTest(path=path):
+                text = read_repo_text(path)
+                for lineno, line in enumerate(text.splitlines(), 1):
+                    stripped = line.strip()
+                    if stripped.startswith("flatpak remote-add") or stripped.startswith("flatpak install"):
+                        self.fail(f"{path}:{lineno} runs a system flatpak op without sudo")
+                self.assertIn("sudo flatpak remote-add", text)
+                self.assertIn("sudo flatpak install", text)
+
 
 if __name__ == "__main__":
     unittest.main()
