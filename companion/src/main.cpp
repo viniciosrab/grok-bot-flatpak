@@ -21,6 +21,7 @@
 #include <QDBusConnectionInterface>
 #include <QDir>
 #include <QFileInfo>
+#include <QIcon>
 #include <QLockFile>
 #include <QProcess>
 #include <QStandardPaths>
@@ -201,7 +202,25 @@ int main(int argc, char **argv)
 
     KStatusNotifierItem tray(&app);
     tray.setTitle(QStringLiteral("Grok Bot (Unofficial)"));
-    tray.setIconByName(QStringLiteral("grok-bot"));
+    // Flatpak exports only icons named after the app-id. The host Plasma
+    // theme therefore sees io.github.viniciosrab.GrokBot, not grok-bot.
+    // IconPixmap is also sent so the tray still renders if theme lookup
+    // misses the exported name.
+    QIcon trayIcon = QIcon::fromTheme(QStringLiteral("io.github.viniciosrab.GrokBot"));
+    const QStringList pixmapCandidates = {
+        QStringLiteral("/app/share/icons/hicolor/48x48/apps/io.github.viniciosrab.GrokBot.png"),
+        QStringLiteral("/app/share/icons/hicolor/64x64/apps/io.github.viniciosrab.GrokBot.png"),
+        QStringLiteral("/app/share/icons/hicolor/128x128/apps/io.github.viniciosrab.GrokBot.png"),
+        QStringLiteral("/app/share/icons/hicolor/512x512/apps/io.github.viniciosrab.GrokBot.png"),
+        QStringLiteral("/app/share/icons/hicolor/512x512/apps/grok-bot.png"),
+    };
+    for (const QString &path : pixmapCandidates) {
+        if (QFileInfo::exists(path)) {
+            trayIcon.addFile(path);
+        }
+    }
+    tray.setIconByName(QStringLiteral("io.github.viniciosrab.GrokBot"));
+    tray.setIconByPixmap(trayIcon);
     tray.setToolTipTitle(QStringLiteral("Grok Bot (Unofficial)"));
     tray.setStandardActionsEnabled(true);
 

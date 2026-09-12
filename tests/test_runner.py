@@ -160,7 +160,12 @@ def check_vendor_icon(manifest_text):
     """Vendor 512 icon plus full hicolor tree; never a redesigned icon."""
     if "resources/icon.png" in manifest_text:
         return False
-    return VENDOR_ICON_512 in manifest_text and VENDOR_HICOLOR_TREE in manifest_text
+    if VENDOR_ICON_512 not in manifest_text or VENDOR_HICOLOR_TREE not in manifest_text:
+        return False
+    # Flatpak exports only app-id-named icons; alias every vendor size.
+    if "-name grok-bot.png" not in manifest_text:
+        return False
+    return "io.github.viniciosrab.GrokBot.png" in manifest_text
 
 
 def check_electron_exec(manifest_text, desktop_text):
@@ -180,7 +185,16 @@ def check_electron_exec(manifest_text, desktop_text):
         for line in desktop_text.splitlines()
         if line.strip().startswith("Icon=")
     ]
-    return icon_lines == ["Icon=io.github.viniciosrab.GrokBot"]
+    if icon_lines != ["Icon=io.github.viniciosrab.GrokBot"]:
+        return False
+    wm_class_lines = [
+        line.strip()
+        for line in desktop_text.splitlines()
+        if line.strip().startswith("StartupWMClass=")
+    ]
+    if wm_class_lines != ["StartupWMClass=grok-bot"]:
+        return False
+    return "--password-store=basic" in manifest_text
 
 
 def check_kde_electron_runtime(manifest_text, companion_src):
@@ -197,6 +211,8 @@ def check_kde_electron_runtime(manifest_text, companion_src):
         "KStatusNotifierItem",
         "qApp->quit()",
         "org.kde.StatusNotifierItem-",
+        'setIconByName(QStringLiteral("io.github.viniciosrab.GrokBot"))',
+        "setIconByPixmap",
     ):
         if required not in companion_src:
             return False

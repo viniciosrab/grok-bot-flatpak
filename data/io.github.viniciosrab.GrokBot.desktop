@@ -6,5 +6,6 @@ GenericName=AI Assistant
 Comment=Unofficial Flatpak for Grok Bot. Community-maintained and not endorsed by the upstream vendor.
 Exec=/app/bin/grok-bot-companion
 Icon=io.github.viniciosrab.GrokBot
+StartupWMClass=grok-bot
 Terminal=false
 Categories=Network;Utility;
