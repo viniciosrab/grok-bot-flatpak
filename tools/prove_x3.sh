@@ -63,6 +63,34 @@ watcher_owned() {
     return 1
   fi
 }
+# Activity-manager ownership uses the same GetNameOwner semantics.
+# Plasmashell aborts shell load without a running kactivitymanagerd
+# (KDE race 466193, no systemd activation under dbus-run-session),
+# so the watcher never gains an owner unless this name is owned first.
+activity_owned() {
+  if command -v busctl >/dev/null 2>&1; then
+    if busctl --user get-name-owner org.kde.ActivityManager >/dev/null 2>&1; then
+      return 0
+    fi
+    if busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetNameOwner s org.kde.ActivityManager >/dev/null 2>&1; then
+      return 0
+    fi
+    return 1
+  elif command -v gdbus >/dev/null 2>&1; then
+    if gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.GetNameOwner org.kde.ActivityManager >/dev/null 2>&1; then
+      return 0
+    fi
+    return 1
+  elif command -v dbus-send >/dev/null 2>&1; then
+    if dbus-send --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.GetNameOwner string:org.kde.ActivityManager >/dev/null 2>&1; then
+      return 0
+    fi
+    return 1
+  else
+    echo "X3 launch proof UNPROVEN: no D-Bus probe (busctl/gdbus/dbus-send) to verify ActivityManager ownership" >&2
+    return 1
+  fi
+}
 # Zombie-safe liveness: kill -0 alone passes for zombies, so also
 # reject Z state via /proc and ps.
 companion_alive() {
@@ -104,11 +132,43 @@ cleanup_group() {
     kill -KILL "${pid}" 2>/dev/null || true
   fi
 }
+# Race 466193: start the real activity manager before plasmashell and
+# wait for org.kde.ActivityManager ownership; otherwise plasmashell
+# aborts shell load and the watcher never gains an owner.
+kactivitymanagerd >kactivitymanagerd.log 2>&1 &
+ACTIVITY_PID=$!
+PLASMA_PID=""
+trap 'kill "${ACTIVITY_PID}" 2>/dev/null || true; kill "${PLASMA_PID}" 2>/dev/null || true' EXIT
+if ! kill -0 "${ACTIVITY_PID}" 2>/dev/null; then
+  echo "X3 launch proof UNPROVEN: kactivitymanagerd failed to start" >&2
+  cat kactivitymanagerd.log || true
+  exit 1
+fi
+ACTIVITY_OK=0
+for i in $(seq 1 30); do
+  if activity_owned; then
+    ACTIVITY_OK=1
+    break
+  fi
+  if ! kill -0 "${ACTIVITY_PID}" 2>/dev/null; then
+    echo "X3 launch proof UNPROVEN: kactivitymanagerd exited before ActivityManager was owned" >&2
+    cat kactivitymanagerd.log || true
+    exit 1
+  fi
+  sleep 2
+done
+if [ "${ACTIVITY_OK}" != 1 ]; then
+  echo "X3 launch proof UNPROVEN: org.kde.ActivityManager has no owner after kactivitymanagerd start" >&2
+  cat kactivitymanagerd.log || true
+  exit 1
+fi
+echo "ActivityManager owned on the session bus (real kactivitymanagerd)"
 plasmashell --no-respawn >plasmashell.log 2>&1 &
 PLASMA_PID=$!
-trap 'kill "${PLASMA_PID}" 2>/dev/null || true' EXIT
 if ! kill -0 "${PLASMA_PID}" 2>/dev/null; then
   echo "X3 launch proof UNPROVEN: plasmashell failed to start" >&2
+  cat kactivitymanagerd.log || true
+  cat plasmashell.log || true
   exit 1
 fi
 WATCHER_OK=0
@@ -119,6 +179,7 @@ for i in $(seq 1 60); do
   fi
   if ! kill -0 "${PLASMA_PID}" 2>/dev/null; then
     echo "X3 launch proof UNPROVEN: plasmashell exited before the watcher was owned" >&2
+    cat kactivitymanagerd.log || true
     cat plasmashell.log || true
     exit 1
   fi
@@ -126,6 +187,7 @@ for i in $(seq 1 60); do
 done
 if [ "${WATCHER_OK}" != 1 ]; then
   echo "X3 launch proof UNPROVEN: org.kde.StatusNotifierWatcher has no owner after plasmashell start" >&2
+  cat kactivitymanagerd.log || true
   cat plasmashell.log || true
   exit 1
 fi
@@ -164,6 +226,14 @@ prove_x3() {
 prove_x3
 if ! kill -0 "${PLASMA_PID}" 2>/dev/null; then
   echo "X3 launch proof FAILED: plasmashell died during observation" >&2
+  cat kactivitymanagerd.log || true
+  cat plasmashell.log || true
+  exit 1
+fi
+if ! kill -0 "${ACTIVITY_PID}" 2>/dev/null; then
+  echo "X3 launch proof FAILED: kactivitymanagerd died during observation" >&2
+  cat kactivitymanagerd.log || true
+  cat plasmashell.log || true
   exit 1
 fi
 INNER_EOF
