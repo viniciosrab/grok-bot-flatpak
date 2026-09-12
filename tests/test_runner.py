@@ -639,5 +639,78 @@ class AtomicContentContractTests(unittest.TestCase):
                 self.assertIn("sudo flatpak install", text)
 
 
+class PublishTransportContractTests(unittest.TestCase):
+    """Publish bootstrap/rollback contract: refs/remotes restore plus first-release no-op."""
+
+    def test_publish_restores_refs_remotes_for_both_arches_before_import(self):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        loop_idx = text.index("for arch in x86_64 aarch64")
+        mkdir_idx = text.index('mkdir -p "${dir}/refs/remotes"')
+        first_pull_idx = text.index(
+            "ostree pull-local --repo=site arch-repos/repo-x86_64"
+        )
+        second_pull_idx = text.index(
+            "ostree pull-local --repo=site arch-repos/repo-aarch64"
+        )
+        self.assertLess(loop_idx, mkdir_idx)
+        self.assertLess(mkdir_idx, first_pull_idx)
+        self.assertLess(mkdir_idx, second_pull_idx)
+        self.assertLess(first_pull_idx, second_pull_idx)
+
+    def test_publish_validates_arch_repos_fail_closed_before_import(self):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        dir_idx = text.index('test -d "${dir}"')
+        config_idx = text.index('test -f "${dir}/config"')
+        heads_idx = text.index('test -d "${dir}/refs/heads"')
+        mkdir_idx = text.index('mkdir -p "${dir}/refs/remotes"')
+        first_pull_idx = text.index(
+            "ostree pull-local --repo=site arch-repos/repo-x86_64"
+        )
+        self.assertLess(dir_idx, mkdir_idx)
+        self.assertLess(config_idx, mkdir_idx)
+        self.assertLess(heads_idx, mkdir_idx)
+        self.assertLess(mkdir_idx, first_pull_idx)
+        for marker in (
+            "missing arch repo",
+            "malformed arch repo",
+            "missing config",
+            "missing refs/heads",
+            "exit 1",
+        ):
+            self.assertIn(marker, text)
+
+    def test_publish_rollback_first_release_noop_skips_deploy(self):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        recover_idx = text.index("id: recover")
+        message_idx = text.index("first release: no prior deployment")
+        false_idx = text.index('echo "recovered=false"')
+        exit_idx = text.index("exit 0", message_idx)
+        true_idx = text.index('echo "recovered=true"')
+        self.assertLess(recover_idx, message_idx)
+        self.assertLess(message_idx, false_idx)
+        self.assertLess(false_idx, exit_idx)
+        self.assertLess(exit_idx, true_idx)
+        lowered = text.lower()
+        self.assertIn("first release", lowered)
+        self.assertIn("no prior deployment", lowered)
+        self.assertIn("GITHUB_OUTPUT", text)
+        self.assertEqual(
+            text.count("steps.recover.outputs.recovered == 'true'"), 2
+        )
+        upload_idx = text.index("Upload the recovered site for rollback")
+        deploy_idx = text.index("Publish the recovered site to Pages")
+        first_cond_idx = text.index(
+            "steps.recover.outputs.recovered == 'true'"
+        )
+        second_cond_idx = text.index(
+            "steps.recover.outputs.recovered == 'true'",
+            first_cond_idx + 1,
+        )
+        self.assertLess(recover_idx, upload_idx)
+        self.assertLess(upload_idx, deploy_idx)
+        self.assertLess(recover_idx, first_cond_idx)
+        self.assertLess(first_cond_idx, second_cond_idx)
+
+
 if __name__ == "__main__":
     unittest.main()
