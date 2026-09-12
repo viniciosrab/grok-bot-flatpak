@@ -26,10 +26,6 @@ modules:
         url: https://github.com/refi64/zypak.git
         tag: v2025.09
         commit: 693a71c5ffa80ec9c9ce2ae03b1ccc493c698e53
-      - type: git
-        url: https://github.com/refi64/nickle.git
-        commit: 0ac7f5dbf659caa8d1d45cb57e942f2bc565da1e
-        path: nickle
     build-commands:
       - make
       - make install FLATPAK_DEST=/app

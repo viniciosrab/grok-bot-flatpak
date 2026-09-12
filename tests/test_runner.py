@@ -104,6 +104,12 @@ WATCHER_NAME = "org.kde.StatusNotifierWatcher"
 VENDOR_ICON_512 = "usr/share/icons/hicolor/512x512/apps/grok-bot.png"
 VENDOR_HICOLOR_TREE = "usr/share/icons/hicolor"
 
+# Pinned zypak module: the gitlink already pins its nickle submodule, so
+# flatpak-builder checks it out automatically with no extra source.
+ZYPAK_URL = "https://github.com/refi64/zypak.git"
+ZYPAK_TAG = "v2025.09"
+ZYPAK_COMMIT = "693a71c5ffa80ec9c9ce2ae03b1ccc493c698e53"
+
 # Closed finish-args set from the design contract. No more, no less.
 CLOSED_FINISH_ARGS = {
     "--share=ipc",
@@ -199,6 +205,24 @@ def check_kde_electron_runtime(manifest_text, companion_src):
     return True
 
 
+def check_zypak_submodule_without_redundant_overlay(manifest_text):
+    """Pinned zypak relies on automatic submodule checkout for nickle.
+
+    The zypak gitlink already pins its nickle submodule, so declaring a
+    second git source overlaid at `path: nickle` collides with the
+    submodule checkout and fails the module build.
+    """
+    for required in (ZYPAK_URL, ZYPAK_TAG, ZYPAK_COMMIT):
+        if required not in manifest_text:
+            return False
+    for line in manifest_text.splitlines():
+        if line.strip() == "path: nickle":
+            return False
+    if "nickle.git" in manifest_text:
+        return False
+    return True
+
+
 def payload_checks(manifest_text, desktop_text, companion_src):
     """Every payload/runtime requirement for one architecture."""
     return {
@@ -207,6 +231,9 @@ def payload_checks(manifest_text, desktop_text, companion_src):
         "vendor-icon": check_vendor_icon(manifest_text),
         "electron-exec": check_electron_exec(manifest_text, desktop_text),
         "kde-electron-runtime": check_kde_electron_runtime(manifest_text, companion_src),
+        "zypak-submodule": check_zypak_submodule_without_redundant_overlay(
+            manifest_text
+        ),
     }
 
 
@@ -291,6 +318,24 @@ class PayloadContentContractTests(unittest.TestCase):
         text = read_repo_text(METAINFO_PATH).lower()
         self.assertIn("unofficial", text)
         self.assertIn("grok-bot", text)
+
+
+class ZypakSubmoduleContractTests(unittest.TestCase):
+    """Pinned zypak uses automatic submodule checkout, never a nickle overlay."""
+
+    def test_redundant_nickle_overlay_rejects(self):
+        pinned = f"url: {ZYPAK_URL}\ntag: {ZYPAK_TAG}\ncommit: {ZYPAK_COMMIT}\n"
+        self.assertTrue(check_zypak_submodule_without_redundant_overlay(pinned))
+        overlay = pinned + "url: https://github.com/refi64/nickle.git\npath: nickle\n"
+        self.assertFalse(check_zypak_submodule_without_redundant_overlay(overlay))
+
+    def test_manifest_keeps_pin_without_nickle_overlay(self):
+        manifest_text = read_repo_text(MANIFEST_PATH)
+        self.assertTrue(
+            check_zypak_submodule_without_redundant_overlay(manifest_text)
+        )
+        for pinned in (ZYPAK_URL, ZYPAK_TAG, ZYPAK_COMMIT):
+            self.assertIn(pinned, manifest_text)
 
 
 VALIDATE_WORKFLOW_PATH = os.path.join(
