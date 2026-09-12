@@ -6,7 +6,7 @@ Implementation of change `package-unofficial-grok-bot` is committed on
 branch `feat/package-unofficial-grok-bot`; PR #2 is open to `main`.
 The Flatpak manifest, KF6 tray companion, Source Checksum pins,
 validation and publication workflows, test runner, and CTest wiring all
-exist; `python3 tools/test.py` passes (58 unittest checks plus the
+exist; `python3 tools/test.py` passes (61 unittest checks plus the
 CTest bootstrap). X3 graphical launch proof remains unproven (see
 below). `strict_tdd` remains `false` per the change contract.
 
