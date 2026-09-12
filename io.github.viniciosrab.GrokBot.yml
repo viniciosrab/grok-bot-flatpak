@@ -1,0 +1,94 @@
+app-id: io.github.viniciosrab.GrokBot
+runtime: org.kde.Platform
+runtime-version: "6.11"
+sdk: org.kde.Sdk
+command: grok-bot-companion
+
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --socket=pulseaudio
+  - --share=network
+  - --device=dri
+  - --talk-name=org.kde.StatusNotifierWatcher
+  - --env=SAND_DISABLE_UPDATES=1
+  - --env=ELECTRON_TRASH=gio
+  - --env=XCURSOR_PATH=/run/host/user-share/icons:/run/host/share/icons
+
+modules:
+  # Chromium/Electron sandbox bridge. Built as a module on the KDE runtime;
+  # the Electron BaseApp is intentionally not used as a base.
+  - name: zypak
+    buildsystem: simple
+    sources:
+      - type: git
+        url: https://github.com/refi64/zypak.git
+        tag: v2025.09
+        commit: 693a71c5ffa80ec9c9ce2ae03b1ccc493c698e53
+    build-commands:
+      - make
+      - make install FLATPAK_DEST=/app
+
+  # Mandatory KDE tray companion (KF6 KStatusNotifierItem). The desktop
+  # entry launches this binary; it gates on StatusNotifierWatcher and
+  # supervises the Electron application.
+  - name: companion
+    buildsystem: cmake-ninja
+    sources:
+      - type: dir
+        path: companion
+
+  # Packaged Payload: the pinned Upstream Artifact is verified by
+  # flatpak-builder against the Source Checksum, unpacked into OSTree, and
+  # adapted with declared integration changes only.
+  - name: grok-bot
+    buildsystem: simple
+    sources:
+      - type: file
+        only-arches: [x86_64]
+        url: https://downloads.cursor.com/grokbot/stable/c1e7d7a46549956d25f53e9c0b9f59666e03aa3a/linux/x64/Grok_Bot_0.47.0.AppImage
+        sha256: c082fda9280c401b47cbbfe012f7b2b5cefd8d96c1291f80eec8561ad6db4af3
+      - type: file
+        only-arches: [aarch64]
+        url: https://downloads.cursor.com/grokbot/stable/c1e7d7a46549956d25f53e9c0b9f59666e03aa3a/linux/arm64/Grok_Bot_0.47.0.AppImage
+        sha256: 8ecf3d80f3d8c848ea522c07f92d57f9b43794607d2f99652ea05ccd82aea62e
+      - type: file
+        path: data/io.github.viniciosrab.GrokBot.desktop
+      - type: file
+        path: data/io.github.viniciosrab.GrokBot.metainfo.xml
+    build-commands:
+      - |
+        set -euo pipefail
+        chmod +x Grok_Bot_*.AppImage
+        ./Grok_Bot_*.AppImage --appimage-extract
+        mv squashfs-root grok-bot-unpacked
+        test -d grok-bot-unpacked/usr/share/icons/hicolor || { echo "missing vendor hicolor tree" >&2; exit 1; }
+        test -f grok-bot-unpacked/usr/share/icons/hicolor/512x512/apps/grok-bot.png || { echo "missing Official Grok Bot Icon" >&2; exit 1; }
+      - |
+        set -euo pipefail
+        APP_DESKTOP="$(find grok-bot-unpacked -maxdepth 2 -name '*.desktop' | head -n 1)"
+        test -n "${APP_DESKTOP}" || { echo "missing upstream desktop entry" >&2; exit 1; }
+        ELECTRON_EXEC="$(grep -m1 '^Exec=' "${APP_DESKTOP}" | cut -d= -f2- | awk '{print $1}')"
+        test -n "${ELECTRON_EXEC}" || { echo "missing Electron Exec in upstream desktop entry" >&2; exit 1; }
+        case "${ELECTRON_EXEC}" in
+          /*) ELECTRON_ENTRY="${ELECTRON_EXEC#/}" ;;
+          *) ELECTRON_ENTRY="${ELECTRON_EXEC}" ;;
+        esac
+        test -e "grok-bot-unpacked/${ELECTRON_ENTRY}" || { echo "Electron entrypoint not found" >&2; exit 1; }
+        printf '%s\n' "${ELECTRON_ENTRY}" > electron-entry.txt
+      - |
+        set -euo pipefail
+        ELECTRON_ENTRY="$(cat electron-entry.txt)"
+        install -d /app/bin /app/grok-bot /app/share/icons/hicolor
+        cp -a grok-bot-unpacked/. /app/grok-bot/
+        printf '#!/bin/sh\nexec /app/bin/zypak-wrapper "/app/grok-bot/%s" "$@"\n' "${ELECTRON_ENTRY}" > /app/bin/grok-bot-electron
+        chmod 755 /app/bin/grok-bot-electron
+        cp -a grok-bot-unpacked/usr/share/icons/hicolor/. /app/share/icons/hicolor/
+        cp -a /app/share/icons/hicolor/512x512/apps/grok-bot.png /app/share/icons/hicolor/512x512/apps/io.github.viniciosrab.GrokBot.png
+        install -Dm644 io.github.viniciosrab.GrokBot.desktop /app/share/applications/io.github.viniciosrab.GrokBot.desktop
+        install -Dm644 io.github.viniciosrab.GrokBot.metainfo.xml /app/share/metainfo/io.github.viniciosrab.GrokBot.metainfo.xml
+
+cleanup:
+  - /app/share/doc
+  - /app/share/man

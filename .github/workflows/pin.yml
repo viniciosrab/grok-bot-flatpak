@@ -1,0 +1,278 @@
+# Pin job: detect the Stable Upstream Release from the sand feeds and open
+# a pin branch PR updating data/pins.yml, io.github.viniciosrab.GrokBot.yml
+# and data/io.github.viniciosrab.GrokBot.metainfo.xml.
+#
+# Feed identity is closed: only the two sand feeds below are queried. No
+# vendor landing page is ever scraped for release detection.
+# code: they travel through environment variables and files, always quoted.
+# Git runs in GITHUB_WORKSPACE with no caller -C flag. The pin commits
+# data/pins.yml, io.github.viniciosrab.GrokBot.yml and
+# data/io.github.viniciosrab.GrokBot.metainfo.xml by explicit path
+# (never stages everything) and pushes the pin
+# branch to origin only. Missing APP_ID/APP_PRIVATE_KEY fails closed.
+
+name: pin
+
+on:
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pin
+  cancel-in-progress: false
+
+env:
+  FEED_X64: https://api2.cursor.sh/updates/api/download/stable/linux-x64/sand
+  FEED_ARM64: https://api2.cursor.sh/updates/api/download/stable/linux-arm64/sand
+
+jobs:
+  pin:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Fail closed on missing secrets
+        env:
+          APP_ID: ${{ secrets.APP_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APP_ID}" ]; then
+            echo "APP_ID is not configured; refusing to open a pin PR" >&2
+            exit 1
+          fi
+          if [ -z "${APP_PRIVATE_KEY}" ]; then
+            echo "APP_PRIVATE_KEY is not configured; refusing to open a pin PR" >&2
+            exit 1
+          fi
+
+      - name: Mint GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Detect Stable Upstream Release from sand feeds
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/pin"
+          python3 - <<'PYEOF'
+          import json
+          import os
+          import re
+          import urllib.parse
+          import urllib.request
+
+          feeds = {
+              "x86_64": os.environ["FEED_X64"],
+              "aarch64": os.environ["FEED_ARM64"],
+          }
+          scratch = os.path.join(os.environ["RUNNER_TEMP"], "pin")
+          wanted = ("downloadUrl", "version", "commitSha")
+          first = None
+          for arch, feed in feeds.items():
+              with urllib.request.urlopen(feed, timeout=60) as response:
+                  payload = json.load(response)
+              for key in wanted:
+                  if not payload.get(key):
+                      raise SystemExit("feed %s is missing %s" % (feed, key))
+              if not re.match(r"^[0-9]+[.][0-9]+[.][0-9]+$", payload["version"]):
+                  raise SystemExit("feed %s has an invalid version" % feed)
+              if not re.match(r"^[0-9a-f]{40}$", payload["commitSha"]):
+                  raise SystemExit("feed %s has an invalid commitSha" % feed)
+              url = payload["downloadUrl"]
+              if not url.startswith("https://") or not url.endswith(".AppImage"):
+                  raise SystemExit("feed %s has a non-AppImage URL" % feed)
+              if urllib.parse.urlsplit(url).hostname != "downloads.cursor.com":
+                  raise SystemExit("feed %s has an off-host artifact URL" % feed)
+              with open(os.path.join(scratch, arch + ".url"), "w") as handle:
+                  handle.write(url + "\n")
+              if first is None:
+                  first = payload
+              elif (payload["version"], payload["commitSha"]) != (
+                  first["version"],
+                  first["commitSha"],
+              ):
+                  raise SystemExit("sand feeds disagree on version/commitSha")
+          with open(os.path.join(scratch, "version"), "w") as handle:
+              handle.write(first["version"] + "\n")
+          with open(os.path.join(scratch, "commit"), "w") as handle:
+              handle.write(first["commitSha"] + "\n")
+          PYEOF
+
+      - name: Compute Source Checksums for both architectures
+        run: |
+          set -euo pipefail
+          X64_URL="$(cat "${RUNNER_TEMP}/pin/x86_64.url")"
+          ARM64_URL="$(cat "${RUNNER_TEMP}/pin/aarch64.url")"
+          curl -sSL --fail -o "${RUNNER_TEMP}/pin/x86_64.AppImage" "${X64_URL}"
+          curl -sSL --fail -o "${RUNNER_TEMP}/pin/aarch64.AppImage" "${ARM64_URL}"
+          X64_SHA="$(sha256sum "${RUNNER_TEMP}/pin/x86_64.AppImage" | cut -d ' ' -f 1)"
+          ARM64_SHA="$(sha256sum "${RUNNER_TEMP}/pin/aarch64.AppImage" | cut -d ' ' -f 1)"
+          printf '%s\n' "${X64_SHA}" > "${RUNNER_TEMP}/pin/x86_64.sha256"
+          printf '%s\n' "${ARM64_SHA}" > "${RUNNER_TEMP}/pin/aarch64.sha256"
+
+      - name: Write data/pins.yml
+        id: write
+        run: |
+          set -euo pipefail
+          PIN_VERSION="$(cat "${RUNNER_TEMP}/pin/version")"
+          case "${PIN_VERSION}" in
+            ""|*[^0-9.]*|*..*)
+              echo "invalid pinned version" >&2
+              exit 1
+              ;;
+          esac
+          python3 - <<'PYEOF'
+          import datetime
+          import os
+          import re
+
+          workspace = os.environ["GITHUB_WORKSPACE"]
+          scratch = os.path.join(os.environ["RUNNER_TEMP"], "pin")
+
+          def read(name):
+              with open(os.path.join(scratch, name)) as handle:
+                  return handle.read().strip()
+
+          pins = (
+              "# Source Checksum pins for the Unofficial Grok Bot Flatpak.\n"
+              "#\n"
+              "# Rewritten by the pin job; do not edit by hand. Digests are\n"
+              "# CI-computed SHA-256 integrity pins, not vendor attestation.\n"
+              "\n"
+              "version: %s\n" % read("version")
+              + "commitSha: %s\n" % read("commit")
+              + "architectures:\n"
+              + "  x86_64:\n"
+              + "    feed: %s\n" % os.environ["FEED_X64"]
+              + "    url: %s\n" % read("x86_64.url")
+              + "    sha256: %s\n" % read("x86_64.sha256")
+              + "  aarch64:\n"
+              + "    feed: %s\n" % os.environ["FEED_ARM64"]
+              + "    url: %s\n" % read("aarch64.url")
+              + "    sha256: %s\n" % read("aarch64.sha256")
+          )
+          with open(os.path.join(workspace, "data", "pins.yml"), "w") as handle:
+              handle.write(pins)
+
+          # N4: keep the metainfo release entry equal to the pinned version
+          # with the runner UTC date, single entry replaced in place.
+          metainfo_path = os.path.join(
+              workspace, "data", "io.github.viniciosrab.GrokBot.metainfo.xml"
+          )
+          with open(metainfo_path) as handle:
+              metainfo_text = handle.read()
+          today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+          new_release = '<release version="%s" date="%s"/>' % (read("version"), today)
+          updated, count = re.subn(
+              r'<release\s+version="[^"]*"\s+date="[^"]*"\s*/>',
+              new_release,
+              metainfo_text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("metainfo release entry not found")
+          with open(metainfo_path, "w") as handle:
+              handle.write(updated)
+
+          # R3: keep the manifest file-source url/sha256 pairs equal to pins
+          # so flatpak-builder uses the freshly pinned Upstream Artifacts.
+          manifest_path = os.path.join(
+              workspace, "io.github.viniciosrab.GrokBot.yml"
+          )
+          with open(manifest_path) as handle:
+              manifest_lines = handle.read().splitlines(keepends=True)
+          wanted = {
+              "x86_64": (read("x86_64.url"), read("x86_64.sha256")),
+              "aarch64": (read("aarch64.url"), read("aarch64.sha256")),
+          }
+          current_arch = None
+          for index, line in enumerate(manifest_lines):
+              stripped = line.strip()
+              if stripped.startswith("only-arches:"):
+                  current_arch = None
+                  for arch in wanted:
+                      if arch in stripped:
+                          current_arch = arch
+              elif stripped.startswith("url:") and current_arch in wanted:
+                  indent = line[: len(line) - len(line.lstrip(" "))]
+                  manifest_lines[index] = (
+                      indent + "url: %s\n" % wanted[current_arch][0]
+                  )
+              elif stripped.startswith("sha256:") and current_arch in wanted:
+                  indent = line[: len(line) - len(line.lstrip(" "))]
+                  manifest_lines[index] = (
+                      indent + "sha256: %s\n" % wanted[current_arch][1]
+                  )
+                  current_arch = None
+          with open(manifest_path, "w") as handle:
+              handle.writelines(manifest_lines)
+          PYEOF
+          if git diff --quiet -- data/pins.yml io.github.viniciosrab.GrokBot.yml data/io.github.viniciosrab.GrokBot.metainfo.xml; then
+            echo "pins are already current; nothing to pin"
+            echo "changed=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "changed=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Commit pins, manifest and metainfo on a pin branch
+        if: ${{ steps.write.outputs.changed == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          PIN_VERSION="$(cat "${RUNNER_TEMP}/pin/version")"
+          case "${PIN_VERSION}" in
+            ""|*[^0-9.]*|*..*)
+              echo "invalid pinned version" >&2
+              exit 1
+              ;;
+          esac
+          PIN_BRANCH="pin/sand-${PIN_VERSION}"
+          printf '%s\n' "${PIN_BRANCH}" > "${RUNNER_TEMP}/pin/branch"
+          git config user.name "grok-bot-pin[bot]"
+          git config user.email "grok-bot-pin[bot]@users.noreply.github.com"
+          CHANGED="$(git status --porcelain)"
+          echo "${CHANGED}"
+          if printf '%s\n' "${CHANGED}" | grep -v '^$' | grep -vE '^.. (data/pins\.yml|io\.github\.viniciosrab\.GrokBot\.yml|data/io\.github\.viniciosrab\.GrokBot\.metainfo\.xml)$' | grep -q .; then
+            echo "refusing to commit: only data/pins.yml, io.github.viniciosrab.GrokBot.yml and data/io.github.viniciosrab.GrokBot.metainfo.xml may change" >&2
+            exit 1
+          fi
+          git fetch origin "${PIN_BRANCH}" || true
+          git checkout -B "${PIN_BRANCH}"
+          git add -- data/pins.yml io.github.viniciosrab.GrokBot.yml data/io.github.viniciosrab.GrokBot.metainfo.xml
+          if git diff --cached --quiet; then
+            echo "pins are already current on ${PIN_BRANCH}; nothing new to push"
+            exit 0
+          fi
+          git commit -m "chore(pin): sand ${PIN_VERSION}" -- data/pins.yml io.github.viniciosrab.GrokBot.yml data/io.github.viniciosrab.GrokBot.metainfo.xml
+          git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 -w0)" push --force-with-lease origin "${PIN_BRANCH}"
+
+      - name: Open the pin branch PR
+        if: ${{ steps.write.outputs.changed == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          PIN_BRANCH="$(cat "${RUNNER_TEMP}/pin/branch")"
+          PIN_VERSION="$(cat "${RUNNER_TEMP}/pin/version")"
+          printf 'Pin Stable Upstream Release %s.\n' "${PIN_VERSION}" > "${RUNNER_TEMP}/pin/body.md"
+          if gh pr view "${PIN_BRANCH}" >/dev/null 2>&1; then
+            echo "PR already exists for ${PIN_BRANCH}; skipping create"
+          else
+            gh pr create --head "${PIN_BRANCH}" \
+              --title "chore(pin): sand ${PIN_VERSION}" \
+              --body-file "${RUNNER_TEMP}/pin/body.md"
+          fi

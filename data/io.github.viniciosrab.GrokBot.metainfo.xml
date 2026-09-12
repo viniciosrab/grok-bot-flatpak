@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.viniciosrab.GrokBot</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>LicenseRef-Proprietary</project_license>
+  <name>Grok Bot (Unofficial)</name>
+  <summary>Unofficial Flatpak for the Grok Bot AI assistant</summary>
+  <description>
+    <p>
+      Community-maintained, unofficial distribution of Grok Bot as a Flatpak.
+      It is not endorsed by the upstream vendor. Updates are delivered only
+      through the Flatpak repository; the bundled updater is disabled.
+    </p>
+  </description>
+  <launchable type="desktop-id">io.github.viniciosrab.GrokBot.desktop</launchable>
+  <icon type="stock">grok-bot</icon>
+  <provides>
+    <binary>grok-bot-companion</binary>
+  </provides>
+  <releases>
+    <release version="0.47.0" date="2026-09-09"/>
+  </releases>
+  <content_rating type="oars-1.1"/>
+</component>

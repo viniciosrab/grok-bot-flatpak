@@ -1,0 +1,16 @@
+# Source Checksum pins for the Unofficial Grok Bot Flatpak.
+#
+# Rewritten by the pin job; do not edit by hand. Digests are
+# CI-computed SHA-256 integrity pins, not vendor attestation.
+
+version: 0.47.0
+commitSha: c1e7d7a46549956d25f53e9c0b9f59666e03aa3a
+architectures:
+  x86_64:
+    feed: https://api2.cursor.sh/updates/api/download/stable/linux-x64/sand
+    url: https://downloads.cursor.com/grokbot/stable/c1e7d7a46549956d25f53e9c0b9f59666e03aa3a/linux/x64/Grok_Bot_0.47.0.AppImage
+    sha256: c082fda9280c401b47cbbfe012f7b2b5cefd8d96c1291f80eec8561ad6db4af3
+  aarch64:
+    feed: https://api2.cursor.sh/updates/api/download/stable/linux-arm64/sand
+    url: https://downloads.cursor.com/grokbot/stable/c1e7d7a46549956d25f53e9c0b9f59666e03aa3a/linux/arm64/Grok_Bot_0.47.0.AppImage
+    sha256: 8ecf3d80f3d8c848ea522c07f92d57f9b43794607d2f99652ea05ccd82aea62e
