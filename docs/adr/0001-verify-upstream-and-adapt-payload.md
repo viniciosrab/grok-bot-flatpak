@@ -1,0 +1,3 @@
+# Verify the upstream artifact and adapt the packaged payload
+
+The project will verify each vendor-published AppImage against the SHA-256 supplied by the official stable update feed, then apply declared and reproducible Flatpak integration changes to the Packaged Payload. The Unofficial Flatpak will use the Official Grok Bot Icon rather than creating, recreating, or redesigning an application icon. This preserves verifiable upstream provenance and visual identity without falsely claiming byte-for-byte identity after adding required desktop integration; strict preservation of the executable payload was rejected because it conflicts with the mandatory KDE tray behavior.
