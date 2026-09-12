@@ -1,5 +1,15 @@
 # Grok Bot Flatpak Handoff
 
+## Publish correction (current branch)
+
+X3 dual-arch proof succeeded for main `2e9249d61d6101048d37dd52280f5159b1711021` (run `34723290767`). Publish run `34723542112` built both architecture repos, then `release` failed at `ostree pull-local --repo=site arch-repos/repo-x86_64` with `Listing refs: opendir(refs/remotes): No such file or directory`.
+
+| Topic | Detail |
+|-------|--------|
+| Root cause | Downloaded artifacts keep `refs/heads/...` but GitHub drops empty `refs/remotes/`; temporary reproduction confirmed `before=1 after=0` after `mkdir -p repo-x86_64/refs/remotes repo-aarch64/refs/remotes` |
+| Fix | Validate both arch repos (`config`, `refs/heads`) fail-closed, restore `refs/remotes`, then import |
+| Rollback | First publication has no `flatpak/deployed-*-r*` marker, so no-op with exit 0 and skipped upload/deploy; release job stays failed |
+
 ## Current state
 
 PR #2 and PR #3 are merged to `main`. The Flatpak manifest, KF6 tray
