@@ -1,0 +1,197 @@
+# Publish job: one Atomic Flatpak Release after all validation passes.
+#
+# Signing and Pages publication run only when the validate workflow
+# concluded with success on a push to the default branch. Each architecture rebuilds
+# its own OSTree repo from the validated commit; the release job merges
+# both into one current-only site repo, signs it, prunes history, tags the
+# release for audit and rollback, and deploys to the Flatpak Repository on
+# Pages. A failed release publishes nothing; a separate rollback job redeploys
+# the tagged prior release with its own Pages upload, so the release job
+# never uploads the Pages artifact twice. Missing GPG_KEY fails closed.
+# Secrets are named, never embedded.
+
+name: publish
+
+on:
+  workflow_run:
+    workflows: [validate]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-x86_64:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the validated commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Build the x86_64 OSTree repo
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install -y flathub org.kde.Platform//6.11 org.kde.Sdk//6.11
+          flatpak-builder --force-clean --repo=repo build-dir io.github.viniciosrab.GrokBot.yml
+
+      - name: Upload the x86_64 repo
+        uses: actions/upload-artifact@v4
+        with:
+          name: repo-x86_64
+          path: repo
+
+  build-aarch64:
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' }}
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - name: Check out the validated commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - name: Build the aarch64 OSTree repo
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          flatpak install -y flathub org.kde.Platform//6.11 org.kde.Sdk//6.11
+          flatpak-builder --force-clean --repo=repo build-dir io.github.viniciosrab.GrokBot.yml
+
+      - name: Upload the aarch64 repo
+        uses: actions/upload-artifact@v4
+        with:
+          name: repo-aarch64
+          path: repo
+
+  release:
+    needs: [build-x86_64, build-aarch64]
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+    steps:
+      - name: Check out the validated commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Fail closed on missing secrets
+        env:
+          GPG_KEY: ${{ secrets.GPG_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GPG_KEY}" ]; then
+            echo "GPG_KEY is not configured; refusing to sign a release" >&2
+            exit 1
+          fi
+
+      - name: Collect both architecture repos
+        uses: actions/download-artifact@v4
+        with:
+          path: arch-repos
+
+      - name: Assemble one current-only signed site repo
+        env:
+          GPG_KEY: ${{ secrets.GPG_KEY }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y flatpak ostree
+          rm -rf site
+          ostree init --repo=site --mode=archive
+          ostree pull-local --repo=site arch-repos/repo-x86_64
+          ostree pull-local --repo=site arch-repos/repo-aarch64
+          printf '%s' "${GPG_KEY}" | gpg --import
+          KEY_ID="$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ {print $5; exit}')"
+          test -n "${KEY_ID}" || { echo "no GPG signing key available" >&2; exit 1; }
+          flatpak build-update-repo --prune --gpg-sign="${KEY_ID}" site
+          tar -czf site.tar.gz site
+
+      - name: Tag the release for audit and rollback
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="$(grep '^version:' data/pins.yml | awk '{print $2}')"
+          test -n "${VERSION}" || { echo "missing pinned version" >&2; exit 1; }
+          if git rev-parse "flatpak/${VERSION}" >/dev/null 2>&1; then
+            echo "tag flatpak/${VERSION} already exists locally; skipping create"
+          elif git ls-remote --exit-code --tags origin "flatpak/${VERSION}" >/dev/null 2>&1; then
+            echo "tag flatpak/${VERSION} already exists on origin; skipping create"
+            git fetch --tags origin "flatpak/${VERSION}" || true
+          else
+            git tag "flatpak/${VERSION}"
+            git push origin "flatpak/${VERSION}"
+          fi
+          if gh release view "flatpak/${VERSION}" >/dev/null 2>&1; then
+            echo "release flatpak/${VERSION} already exists; skipping create"
+          else
+            gh release create "flatpak/${VERSION}" site.tar.gz \
+              --title "Atomic Flatpak Release ${VERSION} (x86_64 + aarch64)" \
+              --notes "Current-only OSTree for x86_64 and aarch64. Rollback target on failure."
+          fi
+
+      - name: Deploy the Flatpak Repository to Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Publish to the Pages environment
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  rollback:
+    needs: [release]
+    if: ${{ failure() && needs.release.result == 'failure' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+    steps:
+      - name: Check out the repository with tags
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Recover the tagged prior release on failure
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION="$(grep '^version:' data/pins.yml | awk '{print $2}')"
+          test -n "${VERSION}" || { echo "missing pinned version" >&2; exit 1; }
+          git fetch --tags origin || true
+          PREV_TAG="$(git tag --list 'flatpak/*' --sort=-v:refname | grep -Fxv "flatpak/${VERSION}" | sed -n '1p')"
+          test -n "${PREV_TAG}" || { echo "no prior release tag to recover" >&2; exit 1; }
+          rm -f site.tar.gz
+          rm -rf site
+          gh release download "${PREV_TAG}" --pattern 'site.tar.gz'
+          tar -xzf site.tar.gz
+          test -d site || { echo "recovered ${PREV_TAG} has no site directory" >&2; exit 1; }
+          echo "recovered ${PREV_TAG}; uploading it to Pages for redeploy"
+
+      - name: Upload the recovered site for rollback
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Publish the recovered site to Pages
+        uses: actions/deploy-pages@v4

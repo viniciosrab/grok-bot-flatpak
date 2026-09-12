@@ -1,0 +1,57 @@
+schema: spec-driven
+
+context: |
+  Project: grok-bot-flatpak (`io.github.viniciosrab.GrokBot`).
+  Stack: documentation-first repository; no supported application project marker discovered.
+  Architecture: documented Flatpak packaging and distribution design; implementation is not initialized.
+  Testing: documented `python3 tools/test.py` and CTest layers are not present on disk.
+  Style: preserve CONTEXT.md terminology and link to existing ADRs rather than restating decisions.
+  Persistence: hybrid OpenSpec plus Engram.
+
+strict_tdd: false
+
+projects: []
+
+testing:
+  strict_tdd: false
+  workspace_command: ""
+  documented_command: "python3 tools/test.py (not present)"
+  rationale: >-
+    No supported project roots or explicit workspace-level test command were discovered.
+    docs/testing.md describes an intended runner, but tools/test.py and its CTest wiring
+    are absent.
+  capabilities:
+    - path: "."
+      stack: "documentation-first"
+      test_command: "— (no live runner)"
+      framework: "—"
+      layers: "—"
+      coverage: "—"
+      linter: "—"
+      type_checker: "—"
+      formatter: "—"
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes.
+    - Link to existing ADRs instead of restating settled decisions.
+  specs:
+    - Use Given/When/Then scenarios.
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY).
+  design:
+    - Include sequence diagrams for complex flows.
+    - Document architecture decisions with rationale.
+  tasks:
+    - Group by phase and use hierarchical numbering.
+    - Keep tasks completable in one session.
+  apply:
+    guidelines:
+      - Follow existing repository terminology and documented boundaries.
+    tdd: false
+    test_command: ""
+  verify:
+    test_command: ""
+    build_command: ""
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas.

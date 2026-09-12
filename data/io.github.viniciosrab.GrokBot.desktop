@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=Grok Bot (Unofficial)
+GenericName=AI Assistant
+Comment=Unofficial Flatpak for Grok Bot. Community-maintained and not endorsed by the upstream vendor.
+Exec=/app/bin/grok-bot-companion
+Icon=grok-bot
+Terminal=false
+Categories=Network;Utility;
