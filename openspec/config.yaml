@@ -14,16 +14,14 @@ projects: []
 
 testing:
   strict_tdd: false
-  workspace_command: ""
-  documented_command: "python3 tools/test.py (not present)"
+  workspace_command: "python3 tools/test.py"
+  documented_command: "python3 tools/test.py"
   rationale: >-
-    No supported project roots or explicit workspace-level test command were discovered.
-    docs/testing.md describes an intended runner, but tools/test.py and its CTest wiring
-    are absent.
+    Workspace test runner tools/test.py with Python unittest and CTest layers is present.
   capabilities:
     - path: "."
       stack: "documentation-first"
-      test_command: "— (no live runner)"
+      test_command: "python3 tools/test.py"
       framework: "—"
       layers: "—"
       coverage: "—"

@@ -30,7 +30,7 @@ FEED_X64 = "https://api2.cursor.sh/updates/api/download/stable/linux-x64/sand"
 FEED_ARM64 = "https://api2.cursor.sh/updates/api/download/stable/linux-arm64/sand"
 ALLOWED_FEEDS = {FEED_X64, FEED_ARM64}
 ARTIFACT_HOST = "downloads.cursor.com"
-ALLOWED_PIN_PATHS = {"data/pins.yml", "io.github.viniciosrab.GrokBot.yml"}
+ALLOWED_PIN_PATHS = {"data/pins.yml", "io.github.viniciosrab.GrokBot.yml", "data/io.github.viniciosrab.GrokBot.metainfo.xml"}
 REQUIRED_PIN_SECRETS = ("APP_ID", "APP_PRIVATE_KEY")
 ALLOWED_PUSH_REMOTE = "origin"
 
@@ -417,6 +417,13 @@ class GitSafetyHelperTests(unittest.TestCase):
     def test_commit_requires_explicit_pin_path(self):
         good = ["git", "commit", "-m", "chore(pin): sand 0.47.0", "--", "data/pins.yml"]
         self.assertTrue(pin_commit_is_path_only(good))
+        triple = [
+            "git", "commit", "-m", "chore(pin): sand 0.47.0", "--",
+            "data/pins.yml",
+            "io.github.viniciosrab.GrokBot.yml",
+            "data/io.github.viniciosrab.GrokBot.metainfo.xml",
+        ]
+        self.assertTrue(pin_commit_is_path_only(triple))
         self.assertFalse(pin_commit_is_path_only(["git", "commit", "-a", "-m", "x"]))
         self.assertFalse(pin_commit_is_path_only(["git", "commit", "--all", "-m", "x"]))
         self.assertFalse(pin_commit_is_path_only(["git", "commit", "-m", "x"]))
@@ -425,11 +432,43 @@ class GitSafetyHelperTests(unittest.TestCase):
                 ["git", "commit", "-m", "x", "--", "data/pins.yml", "extra.txt"]
             )
         )
+        self.assertFalse(
+            pin_commit_is_path_only(
+                [
+                    "git", "commit", "-m", "x", "--",
+                    "data/pins.yml",
+                    "io.github.viniciosrab.GrokBot.yml",
+                    "data/io.github.viniciosrab.GrokBot.metainfo.xml",
+                    "extra.txt",
+                ]
+            )
+        )
 
     def test_add_requires_explicit_pin_path(self):
         self.assertTrue(git_add_is_path_only(["git", "add", "--", "data/pins.yml"]))
+        self.assertTrue(
+            git_add_is_path_only(
+                [
+                    "git", "add", "--",
+                    "data/pins.yml",
+                    "io.github.viniciosrab.GrokBot.yml",
+                    "data/io.github.viniciosrab.GrokBot.metainfo.xml",
+                ]
+            )
+        )
         self.assertFalse(git_add_is_path_only(["git", "add", "-A"]))
         self.assertFalse(git_add_is_path_only(["git", "add", "."]))
+        self.assertFalse(
+            git_add_is_path_only(
+                [
+                    "git", "add", "--",
+                    "data/pins.yml",
+                    "io.github.viniciosrab.GrokBot.yml",
+                    "data/io.github.viniciosrab.GrokBot.metainfo.xml",
+                    "extra.txt",
+                ]
+            )
+        )
 
     def test_push_must_be_origin_pin_branch(self):
         self.assertTrue(push_is_origin_branch(["git", "push", "origin", "pin/sand-0.47.0"]))
@@ -467,6 +506,17 @@ class GitSafetyHelperTests(unittest.TestCase):
         self.assertFalse(
             porcelain_shows_only_allowed(
                 " M data/pins.yml\n M extra.txt\n", {"data/pins.yml"}
+            )
+        )
+        triple_output = (
+            " M data/pins.yml\n"
+            " M io.github.viniciosrab.GrokBot.yml\n"
+            " M data/io.github.viniciosrab.GrokBot.metainfo.xml\n"
+        )
+        self.assertTrue(porcelain_shows_only_allowed(triple_output, ALLOWED_PIN_PATHS))
+        self.assertFalse(
+            porcelain_shows_only_allowed(
+                triple_output + " M extra.txt\n", ALLOWED_PIN_PATHS
             )
         )
 
@@ -581,6 +631,9 @@ class PinWorkflowContractTests(unittest.TestCase):
         text = read_text(PIN_WORKFLOW_PATH)
         self.assertIn("git status --porcelain", text)
         self.assertIn("data/pins.yml", text)
+        self.assertIn("io.github.viniciosrab.GrokBot.yml", text)
+        self.assertIn("data/io.github.viniciosrab.GrokBot.metainfo.xml", text)
+        self.assertIn("metainfo", text.lower())
 
     def test_push_goes_to_origin_pin_branch_only(self):
         text = read_text(PIN_WORKFLOW_PATH)
@@ -594,11 +647,27 @@ class PinWorkflowContractTests(unittest.TestCase):
         for line in push_lines:
             self.assertIn("extraheader", line)
             self.assertIn("origin", line)
-            self.assertIn("push origin", line)
+            self.assertRegex(line, r"push.*origin")
             self.assertIn('"${PIN_BRANCH}"', line)
             self.assertNotIn("HEAD:", line)
-            self.assertNotIn("--force", line)
+            self.assertNotRegex(line, r"--force(?!-with-lease)")
+            self.assertIn("--force-with-lease", line)
         self.assertRegex(text, r'PIN_BRANCH="pin/sand-')
+
+    def test_pin_branch_refreshes_existing_branch(self):
+        text = read_text(PIN_WORKFLOW_PATH)
+        self.assertNotIn('git ls-remote --exit-code --heads origin "${PIN_BRANCH}"', text)
+        self.assertIn('git fetch origin "${PIN_BRANCH}"', text)
+        self.assertIn('git checkout -B "${PIN_BRANCH}"', text)
+        self.assertIn("git diff --cached --quiet", text)
+        self.assertIn("--force-with-lease", text)
+        self.assertIn('PR already exists for ${PIN_BRANCH}; skipping create', text)
+
+    def test_pin_rewrites_metainfo_release(self):
+        text = read_text(PIN_WORKFLOW_PATH)
+        self.assertIn("data/io.github.viniciosrab.GrokBot.metainfo.xml", text)
+        self.assertIn('<release version=', text)
+        self.assertIn('git diff --quiet -- data/pins.yml io.github.viniciosrab.GrokBot.yml data/io.github.viniciosrab.GrokBot.metainfo.xml', text)
 
     def test_pr_create_uses_explicit_head(self):
         text = read_text(PIN_WORKFLOW_PATH)

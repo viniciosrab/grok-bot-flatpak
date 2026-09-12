@@ -174,7 +174,7 @@ def check_electron_exec(manifest_text, desktop_text):
         for line in desktop_text.splitlines()
         if line.strip().startswith("Icon=")
     ]
-    return icon_lines == ["Icon=grok-bot"]
+    return icon_lines == ["Icon=io.github.viniciosrab.GrokBot"]
 
 
 def check_kde_electron_runtime(manifest_text, companion_src):
@@ -437,16 +437,29 @@ class AtomicContentContractTests(unittest.TestCase):
         self.assertIn("prune", text.lower())
         self.assertIn("tag", text.lower())
 
-    def test_publish_rollback_excludes_current_version_tag(self):
+    def test_publish_rollback_uses_newest_deployed_tag(self):
         text = read_repo_text(PUBLISH_WORKFLOW_PATH)
         self.assertIn("Recover the tagged prior release on failure", text)
         self.assertNotIn("sed -n '2p'", text)
-        self.assertIn('grep -Fxv "flatpak/${VERSION}"', text)
+        self.assertNotIn("grep -Fxv", text)
+        self.assertIn("flatpak/deployed-*-r*", text)
+        self.assertIn("flatpak/deployed-${VERSION}-r${RELEASE_R}", text)
+        self.assertIn("--sort=-v:refname", text)
+        self.assertIn("--points-at", text)
+        self.assertIn('gh release download "${REL_TAG}"', text)
 
-    def test_publish_tag_step_refuses_stale_tags(self):
+    def test_publish_tag_step_uses_revisioned_tags(self):
         text = read_repo_text(PUBLISH_WORKFLOW_PATH)
-        self.assertIn("rev-list", text)
-        self.assertIn("refusing silent reuse", text)
+        self.assertIn('git tag --list "flatpak/${VERSION}-r*"', text)
+        self.assertIn("flatpak/${VERSION}-r${N}", text)
+        self.assertIn("N=1", text)
+        self.assertIn("+ 1", text)
+        self.assertNotIn("refusing silent reuse", text)
+
+    def test_publish_has_concurrency_group(self):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        self.assertIn("group: publish", text)
+        self.assertIn("cancel-in-progress: false", text)
 
     def test_workflows_use_sudo_for_flatpak_system_ops(self):
         for path in (VALIDATE_WORKFLOW_PATH, PUBLISH_WORKFLOW_PATH):

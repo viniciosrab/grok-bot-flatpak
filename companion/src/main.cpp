@@ -19,7 +19,9 @@
 #include <QApplication>
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
+#include <QDir>
 #include <QFileInfo>
+#include <QLockFile>
 #include <QProcess>
 #include <QStandardPaths>
 #include <QStringList>
@@ -72,6 +74,10 @@ public:
         , m_ownProcessGroup(false)
     {
         connect(m_child, &QProcess::finished, this, &CompanionController::childFinished);
+        connect(m_child, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+            Q_UNUSED(error);
+            qWarning("grok-bot-companion: child process error: %s", qPrintable(m_child->errorString()));
+        });
         connect(m_tray, &KStatusNotifierItem::activateRequested, this, &CompanionController::showRequested);
         connect(m_tray, &KStatusNotifierItem::quitRequested, this, &CompanionController::quitRequested);
     }
@@ -164,6 +170,12 @@ int main(int argc, char **argv)
     QApplication app(argc, argv);
     QCoreApplication::setApplicationName(QStringLiteral("grok-bot-companion"));
     app.setQuitOnLastWindowClosed(false);
+
+    static QLockFile instanceLock(QDir::temp().filePath(QStringLiteral("grok-bot-companion.lock")));
+    if (!instanceLock.tryLock()) {
+        qWarning("grok-bot-companion: another instance is already running");
+        return 0;
+    }
 
     // Unique KF6 bus identity: org.kde.StatusNotifierItem-<pid>-<n>.
     // Referenced here so the identity contract stays greppable.

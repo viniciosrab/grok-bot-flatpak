@@ -38,7 +38,7 @@ Do not restate these decisions in new planning documents. Link to the relevant a
 A human must provision the following before unattended operation; workflows
 name these secrets only and fail closed while any is missing:
 
-- GitHub App with least-privilege contents permission, installed on the repository: `APP_ID`, `APP_PRIVATE_KEY`.
+- GitHub App with least-privilege contents read/write + pull requests read/write permissions, installed on the repository: `APP_ID`, `APP_PRIVATE_KEY`.
 - Dedicated GPG signing key for the Flatpak Repository: `GPG_KEY`.
 - GitHub Pages environment (`github-pages`) serving the published OSTree site.
 - Branch protection on the default branch (pin PRs merge only after validation passes).
@@ -47,7 +47,7 @@ name these secrets only and fail closed while any is missing:
 
 - Before merge: revert the uncommitted worktree (`git status` shows only the new implementation files plus this handoff).
 - After merge, before publication: a failed validation publishes nothing; fix forward on the pin or payload side.
-- After publication: never publish one architecture. Republish the previous `flatpak/<version>` tag's current-only OSTree as the recovery target; tags and GitHub Releases hold the audit inputs.
+- After publication: never publish one architecture. Republish the newest `flatpak/deployed-<version>-rN` marker's current-only OSTree as the recovery target; `flatpak/<version>-rN` release tags and GitHub Releases hold the audit inputs.
 
 ## User constraints
 

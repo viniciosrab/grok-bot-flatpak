@@ -21,6 +21,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
 jobs:
   build-x86_64:
     if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' }}
@@ -128,30 +132,22 @@ jobs:
           set -euo pipefail
           VERSION="$(grep '^version:' data/pins.yml | awk '{print $2}')"
           test -n "${VERSION}" || { echo "missing pinned version" >&2; exit 1; }
-          if git rev-parse "flatpak/${VERSION}" >/dev/null 2>&1; then
-            TAG_SHA="$(git rev-list -n 1 "flatpak/${VERSION}")"
-            if [ "${TAG_SHA}" != "${HEAD_SHA}" ]; then
-              echo "tag flatpak/${VERSION} points at ${TAG_SHA}, not the validated ${HEAD_SHA}; refusing silent reuse" >&2
-              exit 1
-            fi
-            echo "tag flatpak/${VERSION} already exists locally; skipping create"
-          elif git ls-remote --exit-code --tags origin "flatpak/${VERSION}" >/dev/null 2>&1; then
-            git fetch --tags origin "flatpak/${VERSION}" || true
-            TAG_SHA="$(git rev-list -n 1 "flatpak/${VERSION}")"
-            if [ "${TAG_SHA}" != "${HEAD_SHA}" ]; then
-              echo "tag flatpak/${VERSION} points at ${TAG_SHA}, not the validated ${HEAD_SHA}; refusing silent reuse" >&2
-              exit 1
-            fi
-            echo "tag flatpak/${VERSION} already exists on origin; skipping create"
+          git fetch --tags origin || true
+          LAST_R="$(git tag --list "flatpak/${VERSION}-r*" | sed -n 's/^flatpak\/.*-r\([0-9][0-9]*\)$/\1/p' | sort -n | tail -n 1)"
+          if [ -z "${LAST_R}" ]; then
+            N=1
           else
-            git tag "flatpak/${VERSION}"
-            git push origin "flatpak/${VERSION}"
+            N=$((LAST_R + 1))
           fi
-          if gh release view "flatpak/${VERSION}" >/dev/null 2>&1; then
-            echo "release flatpak/${VERSION} already exists; skipping create"
+          TAG="flatpak/${VERSION}-r${N}"
+          echo "RELEASE_R=${N}" >> "${GITHUB_ENV}"
+          git tag "${TAG}" "${HEAD_SHA}"
+          git push origin "${TAG}"
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" site.tar.gz --clobber
           else
-            gh release create "flatpak/${VERSION}" site.tar.gz \
-              --title "Atomic Flatpak Release ${VERSION} (x86_64 + aarch64)" \
+            gh release create "${TAG}" site.tar.gz \
+              --title "Atomic Flatpak Release ${VERSION} -r${N} (x86_64 + aarch64)" \
               --notes "Current-only OSTree for x86_64 and aarch64. Rollback target on failure."
           fi
 
@@ -163,6 +159,29 @@ jobs:
       - name: Publish to the Pages environment
         id: deployment
         uses: actions/deploy-pages@v4
+
+      - name: Mark the deployed release
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          VERSION="$(grep '^version:' data/pins.yml | awk '{print $2}')"
+          test -n "${VERSION}" || { echo "missing pinned version" >&2; exit 1; }
+          test -n "${RELEASE_R:-}" || { echo "missing release revision" >&2; exit 1; }
+          MARKER="flatpak/deployed-${VERSION}-r${RELEASE_R}"
+          git fetch --tags origin || true
+          if git rev-parse "${MARKER}" >/dev/null 2>&1; then
+            MARKER_SHA="$(git rev-list -n 1 "${MARKER}")"
+            if [ "${MARKER_SHA}" = "${HEAD_SHA}" ]; then
+              echo "${MARKER} already points at ${HEAD_SHA}; skipping create"
+            else
+              echo "${MARKER} points at ${MARKER_SHA}, not the deployed ${HEAD_SHA}; refusing to move deployed marker" >&2
+              exit 1
+            fi
+          else
+            git tag "${MARKER}" "${HEAD_SHA}"
+            git push origin "${MARKER}"
+          fi
 
   rollback:
     needs: [release]
@@ -187,17 +206,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          VERSION="$(grep '^version:' data/pins.yml | awk '{print $2}')"
-          test -n "${VERSION}" || { echo "missing pinned version" >&2; exit 1; }
           git fetch --tags origin || true
-          PREV_TAG="$(git tag --list 'flatpak/*' --sort=-v:refname | grep -Fxv "flatpak/${VERSION}" | sed -n '1p')"
+          PREV_TAG="$(git tag --list 'flatpak/deployed-*-r*' --sort=-v:refname | sed -n '1p')"
           test -n "${PREV_TAG}" || { echo "no prior release tag to recover" >&2; exit 1; }
+          MARKER_SHA="$(git rev-list -n 1 "${PREV_TAG}")"
+          REL_TAG="$(git tag --points-at "${MARKER_SHA}" --list 'flatpak/*-r*' | sort -V | tail -n 1)"
+          test -n "${REL_TAG}" || { echo "no release tag points at ${PREV_TAG}" >&2; exit 1; }
           rm -f site.tar.gz
           rm -rf site
-          gh release download "${PREV_TAG}" --pattern 'site.tar.gz'
+          gh release download "${REL_TAG}" --pattern 'site.tar.gz'
           tar -xzf site.tar.gz
-          test -d site || { echo "recovered ${PREV_TAG} has no site directory" >&2; exit 1; }
-          echo "recovered ${PREV_TAG}; uploading it to Pages for redeploy"
+          test -d site || { echo "recovered ${REL_TAG} has no site directory" >&2; exit 1; }
+          echo "recovered ${REL_TAG}; uploading it to Pages for redeploy"
 
       - name: Upload the recovered site for rollback
         uses: actions/upload-pages-artifact@v3

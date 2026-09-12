@@ -84,11 +84,12 @@ modules:
       - |
         set -euo pipefail
         ELECTRON_ENTRY="$(cat electron-entry.txt)"
-        install -d /app/bin /app/grok-bot
+        install -d /app/bin /app/grok-bot /app/share/icons/hicolor
         cp -a grok-bot-unpacked/. /app/grok-bot/
         printf '#!/bin/sh\nexec /app/bin/zypak-wrapper "/app/grok-bot/%s" "$@"\n' "${ELECTRON_ENTRY}" > /app/bin/grok-bot-electron
         chmod 755 /app/bin/grok-bot-electron
         cp -a grok-bot-unpacked/usr/share/icons/hicolor/. /app/share/icons/hicolor/
+        cp -a /app/share/icons/hicolor/512x512/apps/grok-bot.png /app/share/icons/hicolor/512x512/apps/io.github.viniciosrab.GrokBot.png
         install -Dm644 io.github.viniciosrab.GrokBot.desktop /app/share/applications/io.github.viniciosrab.GrokBot.desktop
         install -Dm644 io.github.viniciosrab.GrokBot.metainfo.xml /app/share/metainfo/io.github.viniciosrab.GrokBot.metainfo.xml
 

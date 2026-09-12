@@ -1,11 +1,13 @@
 # Pin job: detect the Stable Upstream Release from the sand feeds and open
-# a pin branch PR updating data/pins.yml and io.github.viniciosrab.GrokBot.yml.
+# a pin branch PR updating data/pins.yml, io.github.viniciosrab.GrokBot.yml
+# and data/io.github.viniciosrab.GrokBot.metainfo.xml.
 #
 # Feed identity is closed: only the two sand feeds below are queried. No
 # vendor landing page is ever scraped for release detection.
 # code: they travel through environment variables and files, always quoted.
 # Git runs in GITHUB_WORKSPACE with no caller -C flag. The pin commits
-# data/pins.yml and io.github.viniciosrab.GrokBot.yml by explicit path
+# data/pins.yml, io.github.viniciosrab.GrokBot.yml and
+# data/io.github.viniciosrab.GrokBot.metainfo.xml by explicit path
 # (never stages everything) and pushes the pin
 # branch to origin only. Missing APP_ID/APP_PRIVATE_KEY fails closed.
 
@@ -133,7 +135,9 @@ jobs:
               ;;
           esac
           python3 - <<'PYEOF'
+          import datetime
           import os
+          import re
 
           workspace = os.environ["GITHUB_WORKSPACE"]
           scratch = os.path.join(os.environ["RUNNER_TEMP"], "pin")
@@ -162,6 +166,26 @@ jobs:
           )
           with open(os.path.join(workspace, "data", "pins.yml"), "w") as handle:
               handle.write(pins)
+
+          # N4: keep the metainfo release entry equal to the pinned version
+          # with the runner UTC date, single entry replaced in place.
+          metainfo_path = os.path.join(
+              workspace, "data", "io.github.viniciosrab.GrokBot.metainfo.xml"
+          )
+          with open(metainfo_path) as handle:
+              metainfo_text = handle.read()
+          today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+          new_release = '<release version="%s" date="%s"/>' % (read("version"), today)
+          updated, count = re.subn(
+              r'<release\s+version="[^"]*"\s+date="[^"]*"\s*/>',
+              new_release,
+              metainfo_text,
+              count=1,
+          )
+          if count != 1:
+              raise SystemExit("metainfo release entry not found")
+          with open(metainfo_path, "w") as handle:
+              handle.write(updated)
 
           # R3: keep the manifest file-source url/sha256 pairs equal to pins
           # so flatpak-builder uses the freshly pinned Upstream Artifacts.
@@ -196,14 +220,14 @@ jobs:
           with open(manifest_path, "w") as handle:
               handle.writelines(manifest_lines)
           PYEOF
-          if git diff --quiet -- data/pins.yml io.github.viniciosrab.GrokBot.yml; then
+          if git diff --quiet -- data/pins.yml io.github.viniciosrab.GrokBot.yml data/io.github.viniciosrab.GrokBot.metainfo.xml; then
             echo "pins are already current; nothing to pin"
             echo "changed=false" >> "${GITHUB_OUTPUT}"
           else
             echo "changed=true" >> "${GITHUB_OUTPUT}"
           fi
 
-      - name: Commit data/pins.yml on a pin branch
+      - name: Commit pins, manifest and metainfo on a pin branch
         if: ${{ steps.write.outputs.changed == 'true' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -218,22 +242,23 @@ jobs:
           esac
           PIN_BRANCH="pin/sand-${PIN_VERSION}"
           printf '%s\n' "${PIN_BRANCH}" > "${RUNNER_TEMP}/pin/branch"
-          if git ls-remote --exit-code --heads origin "${PIN_BRANCH}" >/dev/null 2>&1; then
-            echo "pin branch ${PIN_BRANCH} already exists; skipping push (PR already open)"
-            exit 0
-          fi
           git config user.name "grok-bot-pin[bot]"
           git config user.email "grok-bot-pin[bot]@users.noreply.github.com"
           CHANGED="$(git status --porcelain)"
           echo "${CHANGED}"
-          if printf '%s\n' "${CHANGED}" | grep -v '^$' | grep -vE '^.. (data/pins\.yml|io\.github\.viniciosrab\.GrokBot\.yml)$' | grep -q .; then
-            echo "refusing to commit: only data/pins.yml and io.github.viniciosrab.GrokBot.yml may change" >&2
+          if printf '%s\n' "${CHANGED}" | grep -v '^$' | grep -vE '^.. (data/pins\.yml|io\.github\.viniciosrab\.GrokBot\.yml|data/io\.github\.viniciosrab\.GrokBot\.metainfo\.xml)$' | grep -q .; then
+            echo "refusing to commit: only data/pins.yml, io.github.viniciosrab.GrokBot.yml and data/io.github.viniciosrab.GrokBot.metainfo.xml may change" >&2
             exit 1
           fi
-          git add -- data/pins.yml io.github.viniciosrab.GrokBot.yml
+          git fetch origin "${PIN_BRANCH}" || true
           git checkout -B "${PIN_BRANCH}"
-          git commit -m "chore(pin): sand ${PIN_VERSION}" -- data/pins.yml io.github.viniciosrab.GrokBot.yml
-          git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 -w0)" push origin "${PIN_BRANCH}"
+          git add -- data/pins.yml io.github.viniciosrab.GrokBot.yml data/io.github.viniciosrab.GrokBot.metainfo.xml
+          if git diff --cached --quiet; then
+            echo "pins are already current on ${PIN_BRANCH}; nothing new to push"
+            exit 0
+          fi
+          git commit -m "chore(pin): sand ${PIN_VERSION}" -- data/pins.yml io.github.viniciosrab.GrokBot.yml data/io.github.viniciosrab.GrokBot.metainfo.xml
+          git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 -w0)" push --force-with-lease origin "${PIN_BRANCH}"
 
       - name: Open the pin branch PR
         if: ${{ steps.write.outputs.changed == 'true' }}
