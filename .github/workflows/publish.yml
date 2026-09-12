@@ -1,11 +1,15 @@
-# Publish job: one Atomic Flatpak Release after explicit X3 proof passes.
+# Publish job: one Atomic Flatpak Release after automatic X3 proof passes.
 #
-# Signing and Pages publication run only when the manual x3 workflow
-# concluded with success for the default branch. Each architecture rebuilds
+# Signing and Pages publication run only when the automatic x3 workflow
+# (triggered by successful validate on main) concludes with success for
+# main. Each architecture rebuilds
 # its own OSTree repo from the validated commit; the release job merges
 # both into one current-only site repo, signs it, prunes history, tags the
 # release for audit and rollback, and deploys to the Flatpak Repository on
-# Pages. A failed release publishes nothing; a separate rollback job redeploys
+# Pages. Chain: validate on main -> x3 -> publish fits the three
+# workflow_run level limit. Checkouts use the triggering run head SHA,
+# never implicit default-branch bytes. Manual or pull request runs never
+# publish. A failed release publishes nothing; a separate rollback job redeploys
 # the tagged prior release with its own Pages upload, so the release job
 # never uploads the Pages artifact twice. Missing GPG_KEY fails closed.
 # Secrets are named, never embedded.
@@ -27,7 +31,7 @@ concurrency:
 
 jobs:
   build-x86_64:
-    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_dispatch' }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_run' && github.event.workflow_run.head_branch == 'main' }}
     runs-on: ubuntu-24.04
     steps:
       - name: Check out the X3-proven commit
@@ -51,7 +55,7 @@ jobs:
           path: repo
 
   build-aarch64:
-    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_dispatch' }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_run' && github.event.workflow_run.head_branch == 'main' }}
     runs-on: ubuntu-24.04-arm
     steps:
       - name: Check out the X3-proven commit
@@ -76,7 +80,7 @@ jobs:
 
   release:
     needs: [build-x86_64, build-aarch64]
-    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_dispatch' }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_run' && github.event.workflow_run.head_branch == 'main' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write

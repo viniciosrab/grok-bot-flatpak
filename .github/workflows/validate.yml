@@ -6,8 +6,8 @@
 # architecture. Nothing here publishes.
 #
 # X3 contract (design: Electron/zypak on KDE 6.11): positive X3 graphical
-# proof lives ONLY in the separate manual `x3` workflow, which never runs
-# automatically on pull requests. The watcher-gate rejection step below is
+# proof lives ONLY in the separate automatic hosted `x3` workflow, which
+# runs after successful validate on main and never runs on pull requests. The watcher-gate rejection step below is
 # a negative test — it proves the companion fails closed without a
 # StatusNotifierWatcher — and MUST NEVER be read as X3 launch success. It
 # runs headless with QT_QPA_PLATFORM=offscreen so Qt constructs without a
@@ -94,7 +94,7 @@ jobs:
           grep -q 'StatusNotifierWatcher' launch.log || { echo "watcher gate went silent" >&2; exit 1; }
           test "${RC}" -eq 1 || { echo "headless launch must fail closed at the watcher gate" >&2; exit 1; }
           echo "NEGATIVE TEST ONLY: companion rejects a watcherless session with exit 1."
-          echo "This is NOT X3 launch proof. Positive X3 proof runs only in the manual x3 workflow."
+          echo "This is NOT X3 launch proof. Positive X3 proof runs only in the automatic hosted x3 workflow."
 
   build-aarch64:
     runs-on: ubuntu-24.04-arm
@@ -153,4 +153,4 @@ jobs:
           grep -q 'StatusNotifierWatcher' launch.log || { echo "watcher gate went silent" >&2; exit 1; }
           test "${RC}" -eq 1 || { echo "headless launch must fail closed at the watcher gate" >&2; exit 1; }
           echo "NEGATIVE TEST ONLY: companion rejects a watcherless session with exit 1."
-          echo "This is NOT X3 launch proof. Positive X3 proof runs only in the manual x3 workflow."
+          echo "This is NOT X3 launch proof. Positive X3 proof runs only in the automatic hosted x3 workflow."
