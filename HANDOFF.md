@@ -13,10 +13,23 @@ so `org.kde.StatusNotifierWatcher` never gained an owner and publish
 correctly skipped. PR #4 started the daemon before `plasmashell` but
 failed fail-closed again with `kactivitymanagerd: command not found`:
 the daemon binary is not on PATH, it lives under
-`/usr/lib/<arch>/libexec`. This branch resolves it from the
+`/usr/lib/<arch>/libexec`. PR #5 resolved it from the
 authoritative `org.kde.ActivityManager.service` D-Bus service file
 (architecture-independent) and waits for `org.kde.ActivityManager`
-ownership first. `strict_tdd` remains `false` per the change contract.
+ownership first. Automatic X3 run `34722207684` then failed identically
+on x86_64 and aarch64 after PR #5: `kactivitymanagerd` started
+correctly and `org.kde.ActivityManager` gained an owner,
+`plasmashell --no-respawn` stayed alive, but
+`org.kde.StatusNotifierWatcher` had no owner after 120 seconds. The
+Ubuntu 24.04 `plasma-workspace` package ships the real KDED plugin at
+`/usr/lib/<arch>/qt5/plugins/kf5/kded/statusnotifierwatcher.so`; logs
+show D-Bus briefly activated `org.kde.kded5`, but the watcher stayed
+ownerless. This branch starts the real `kded5` persistently from the
+authoritative `org.kde.kded5.service` D-Bus service file before
+`plasmashell`, waits for `org.kde.kded5` ownership, demand-loads the
+real `statusnotifierwatcher` module through the real KDED `loadModule`
+API, then waits for the real `org.kde.StatusNotifierWatcher` owner.
+`strict_tdd` remains `false` per the change contract.
 
 ## Read first
 
