@@ -134,8 +134,19 @@ cleanup_group() {
 }
 # Race 466193: start the real activity manager before plasmashell and
 # wait for org.kde.ActivityManager ownership; otherwise plasmashell
-# aborts shell load and the watcher never gains an owner.
-kactivitymanagerd >kactivitymanagerd.log 2>&1 &
+# aborts shell load and the watcher never gains an owner. The daemon
+# binary is not on PATH (it lives under /usr/lib/<arch>/libexec), so
+# resolve it from the authoritative D-Bus service file, which is
+# architecture-independent.
+KAMD_BIN="$(command -v kactivitymanagerd 2>/dev/null || true)"
+if [ -z "${KAMD_BIN}" ]; then
+  KAMD_BIN="$(awk '/^Exec=/{sub(/^Exec=/, ""); print $1; exit}' /usr/share/dbus-1/services/org.kde.ActivityManager.service 2>/dev/null || true)"
+fi
+if [ -z "${KAMD_BIN}" ] || [ ! -x "${KAMD_BIN}" ]; then
+  echo "X3 launch proof UNPROVEN: kactivitymanagerd binary not found (tried PATH and org.kde.ActivityManager.service Exec)" >&2
+  exit 1
+fi
+"${KAMD_BIN}" >kactivitymanagerd.log 2>&1 &
 ACTIVITY_PID=$!
 PLASMA_PID=""
 trap 'kill "${ACTIVITY_PID}" 2>/dev/null || true; kill "${PLASMA_PID}" 2>/dev/null || true' EXIT
