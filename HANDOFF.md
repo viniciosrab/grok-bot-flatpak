@@ -6,8 +6,10 @@ Implementation of change `package-unofficial-grok-bot` is committed on
 branch `feat/package-unofficial-grok-bot`; PR #2 is open to `main`.
 The Flatpak manifest, KF6 tray companion, Source Checksum pins,
 validation and publication workflows, test runner, and CTest wiring all
-exist; `python3 tools/test.py` passes (61 unittest checks plus the
-CTest bootstrap). X3 graphical launch proof remains unproven (see
+exist; `python3 tools/test.py` passes. The release chain is now fully
+automatic on GitHub-hosted runners: successful validate on main ->
+automatic hosted X3 -> publish. X3 graphical launch proof is implemented
+but remains unproven until the main-line chain runs (see
 below). `strict_tdd` remains `false` per the change contract.
 
 ## Read first
@@ -27,7 +29,7 @@ Do not restate these decisions in new planning documents. Link to the relevant a
 - The application recognizes `SAND_DISABLE_UPDATES=1`; the Flatpak sets it so `flatpak update` remains the sole update authority.
 - The verified Grok Bot 0.47.0 `x86_64` and `aarch64` Upstream Artifacts do not provide a system tray item: neither Electron main-process bundle constructs `Tray` or references StatusNotifierItem, and both use the same Linux `window-all-closed` handler that calls `app.quit()`.
 - The Unofficial Flatpak therefore ships a companion StatusNotifierItem (`companion/src/main.cpp`). It remains available after Grok Bot exits, relaunches the application through show, and terminates both through quit; see ADR 0003. Absence of `StatusNotifierWatcher` exits nonzero; there is no trayless fallback.
- - The manifest builds on `org.kde.Platform`/`org.kde.Sdk` 6.11 with zypak as a module (not an Electron BaseApp base). X3 graphical launch proof remains unproven: it still needs a real graphical KDE session. `validate.yml` proves the dual-arch build plus the watcher-gate rejection headlessly (`QT_QPA_PLATFORM=offscreen` negative test only, NOT X3 launch success); positive X3 proof is the manual-only `x3` workflow (dual-arch, fail-closed, never auto-required on PRs), and `publish.yml` runs only after a successful `x3` run on `main`, so neither architecture is X3-validated yet.
+ - The manifest builds on `org.kde.Platform`/`org.kde.Sdk` 6.11 with zypak as a module (not an Electron BaseApp base). X3 graphical launch proof is automatic on GitHub-hosted runners but remains unproven until the main-line chain runs: successful `validate` on `main` triggers the `x3` workflow (dual-arch, fail-closed), which starts a real `plasmashell` process on `Xvfb` under a real D-Bus session via the single shared `tools/prove_x3.sh` proof both architecture jobs call, waits for the real `StatusNotifierWatcher` name, then launches the Packaged Payload through the companion and proves the companion stays alive. `validate.yml` still proves the dual-arch build plus the watcher-gate rejection headlessly (`QT_QPA_PLATFORM=offscreen` negative test only, NOT X3 launch success); positive X3 proof runs only in the automatic hosted `x3` workflow, and `publish.yml` runs only after successful automatic `x3` on `main`, so neither architecture is X3-validated yet.
 - GitHub Pages currently limits a published site to 1 GB and has a soft bandwidth limit of 100 GB per month. Revalidate these limits before the first publication.
 - Public GitHub-hosted native ARM Linux runners were available under `ubuntu-24.04-arm` during this session.
 - Workflow-created PRs using the repository `GITHUB_TOKEN` enter an approval-required state. The design therefore requires a dedicated, least-privilege GitHub App with short-lived installation tokens.

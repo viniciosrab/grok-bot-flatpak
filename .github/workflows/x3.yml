@@ -1,29 +1,66 @@
-# X3 proof job: explicit manual graphical proof (Electron/zypak on KDE 6.11).
+# X3 proof job: automatic hosted graphical proof (Electron/zypak on KDE 6.11).
 #
-# This workflow NEVER runs automatically on ordinary pull requests: it is
-# workflow_dispatch only, because hosted runners lack the graphical KDE
-# infrastructure X3 requires. An architecture counts as X3-proven ONLY when
-# its job observes a real graphical KDE session, a real session-bus
-# org.kde.StatusNotifierWatcher, and the companion staying alive under it.
-# The watcher is never provisioned or faked here; without it the job fails
-# closed (UNPROVEN). A successful X3 run on the main branch is the only
-# signal that authorizes publication consideration in the publish
-# workflow; validate success alone never does.
+# Chain: successful validate on main -> X3 -> publish. This workflow runs
+# automatically when validate completes on main and stays available as a
+# manual workflow_dispatch run for diagnosis. Each architecture runs on
+# GitHub-hosted runners (x86_64 on ubuntu-24.04, aarch64 on
+# ubuntu-24.04-arm) and calls the single shared tools/prove_x3.sh proof,
+# which starts a real KDE Plasma plasmashell process on Xvfb under a real
+# D-Bus session, proves ownership of the real
+# org.kde.StatusNotifierWatcher name via GetNameOwner, then launches the
+# Packaged Payload through the companion and proves the companion stays
+# alive with zombie-safe observation and process-group cleanup. No watcher
+# service is provisioned here; without the real watcher the job fails
+# closed (UNPROVEN). An explicit gate job fails closed on any workflow_run
+# not caused by successful push on main, so skipped proof never reads as
+# success. Both architectures must pass or publish never runs. Checkouts
+# use the triggering run head SHA with explicit manual fallback, never
+# implicit default-branch bytes.
 
 name: x3
 
 on:
+  workflow_run:
+    workflows: [validate]
+    types: [completed]
+    branches: [main]
   workflow_dispatch: {}
 
 permissions:
   contents: read
 
 jobs:
-  proof-x86_64:
+  gate:
+    if: ${{ github.event_name == 'workflow_run' }}
     runs-on: ubuntu-24.04
     steps:
-      - name: Check out the repository
+      - name: Fail closed on unexpected validate trigger
+        env:
+          TRIGGER_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          TRIGGER_EVENT: ${{ github.event.workflow_run.event }}
+          TRIGGER_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          set -euo pipefail
+          echo "validate conclusion: ${TRIGGER_CONCLUSION}"
+          echo "validate event: ${TRIGGER_EVENT}"
+          echo "validate head branch: ${TRIGGER_BRANCH}"
+          if [ "${TRIGGER_CONCLUSION}" = "success" ] && [ "${TRIGGER_EVENT}" = "push" ] && [ "${TRIGGER_BRANCH}" = "main" ]; then
+            echo "gate: valid main-line validate chain"
+            exit 0
+          fi
+          echo "gate: unexpected X3 trigger (not successful push on main); failing closed" >&2
+          exit 1
+
+  proof-x86_64:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main') }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the validated commit
         uses: actions/checkout@v4
+        with:
+          # Automatic runs use the triggering validate head SHA; manual
+          # runs fall back explicitly to the dispatch SHA.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Verify the x86_64 Source Checksum
         run: |
@@ -49,74 +86,30 @@ jobs:
           set -euo pipefail
           flatpak-builder --force-clean --repo=repo build-dir io.github.viniciosrab.GrokBot.yml
 
-      - name: X3 launch proof — Electron/zypak on KDE 6.11 (fail-closed)
+      - name: Install hosted KDE proof dependencies
         run: |
           set -euo pipefail
-          # X3: companion is a long-running tray. PASS only with positive
-          # proof of org.kde.StatusNotifierWatcher on the session bus AND
-          # the companion staying alive under it; exit 0 is not expected.
-          prove_x3() {
-            local wrap="$1"
-            local bus_names=""
-            if command -v busctl >/dev/null 2>&1; then
-              bus_names="$(busctl --user list 2>/dev/null || true)"
-            elif command -v gdbus >/dev/null 2>&1; then
-              bus_names="$(gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.ListNames 2>/dev/null || true)"
-            elif command -v dbus-send >/dev/null 2>&1; then
-              bus_names="$(dbus-send --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ListNames 2>/dev/null || true)"
-            else
-              echo "X3 launch proof UNPROVEN: no D-Bus probe (busctl/gdbus/dbus-send) to verify StatusNotifierWatcher" >&2
-              return 1
-            fi
-            case "${bus_names}" in
-              *org.kde.StatusNotifierWatcher*)
-                echo "StatusNotifierWatcher present on the session bus"
-                ;;
-              *)
-                echo "X3 launch proof UNPROVEN: org.kde.StatusNotifierWatcher not on the session bus" >&2
-                return 1
-                ;;
-            esac
-            set +e
-            if [ -n "${wrap}" ]; then
-              ${wrap} flatpak-builder --run build-dir io.github.viniciosrab.GrokBot.yml /app/bin/grok-bot-companion >x3-launch.log 2>&1 &
-            else
-              flatpak-builder --run build-dir io.github.viniciosrab.GrokBot.yml /app/bin/grok-bot-companion >x3-launch.log 2>&1 &
-            fi
-            local pid=$!
-            sleep 8
-            if kill -0 "${pid}" 2>/dev/null; then
-              kill "${pid}" 2>/dev/null || true
-              wait "${pid}" 2>/dev/null || true
-              set -e
-              cat x3-launch.log
-              echo "X3 launch proof: PASS — watcher-verified companion stayed up (tray process)"
-              return 0
-            fi
-            wait "${pid}"
-            local rc=$?
-            set -e
-            cat x3-launch.log
-            echo "X3 launch proof FAILED: companion exited ${rc}" >&2
-            return 1
-          }
-          if [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
-            echo "graphical session detected; attempting X3 Electron/zypak launch proof"
-            prove_x3 ""
-          elif command -v xvfb-run >/dev/null 2>&1; then
-            echo "no graphical session; attempting X3 launch under xvfb-run (still requires a StatusNotifierWatcher)"
-            prove_x3 "xvfb-run -a" || { echo "This architecture is NOT validated for X3. Failing closed." >&2; exit 1; }
-          else
-            echo "X3 launch proof UNPROVEN: no graphical KDE session (DISPLAY and WAYLAND_DISPLAY unset) and no xvfb-run on this runner" >&2
-            echo "This architecture is NOT validated for X3. Failing closed." >&2
-            exit 1
-          fi
+          sudo apt-get update
+          sudo apt-get install -y plasma-workspace xvfb dbus-x11
+
+      - name: X3 launch proof — Electron/zypak on KDE 6.11 (fail-closed, hosted)
+        run: |
+          set -euo pipefail
+          # Single shared proof for both architectures. tools/prove_x3.sh
+          # runs real plasmashell on Xvfb with owner proof and zombie-safe
+          # observation; any failure exits nonzero so publish never runs.
+          bash tools/prove_x3.sh
 
   proof-aarch64:
+    if: ${{ github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main') }}
     runs-on: ubuntu-24.04-arm
     steps:
-      - name: Check out the repository
+      - name: Check out the validated commit
         uses: actions/checkout@v4
+        with:
+          # Automatic runs use the triggering validate head SHA; manual
+          # runs fall back explicitly to the dispatch SHA.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
       - name: Verify the aarch64 Source Checksum
         run: |
@@ -142,65 +135,16 @@ jobs:
           set -euo pipefail
           flatpak-builder --force-clean --repo=repo build-dir io.github.viniciosrab.GrokBot.yml
 
-      - name: X3 launch proof — Electron/zypak on KDE 6.11 (fail-closed)
+      - name: Install hosted KDE proof dependencies
         run: |
           set -euo pipefail
-          # X3: companion is a long-running tray. PASS only with positive
-          # proof of org.kde.StatusNotifierWatcher on the session bus AND
-          # the companion staying alive under it; exit 0 is not expected.
-          prove_x3() {
-            local wrap="$1"
-            local bus_names=""
-            if command -v busctl >/dev/null 2>&1; then
-              bus_names="$(busctl --user list 2>/dev/null || true)"
-            elif command -v gdbus >/dev/null 2>&1; then
-              bus_names="$(gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.ListNames 2>/dev/null || true)"
-            elif command -v dbus-send >/dev/null 2>&1; then
-              bus_names="$(dbus-send --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ListNames 2>/dev/null || true)"
-            else
-              echo "X3 launch proof UNPROVEN: no D-Bus probe (busctl/gdbus/dbus-send) to verify StatusNotifierWatcher" >&2
-              return 1
-            fi
-            case "${bus_names}" in
-              *org.kde.StatusNotifierWatcher*)
-                echo "StatusNotifierWatcher present on the session bus"
-                ;;
-              *)
-                echo "X3 launch proof UNPROVEN: org.kde.StatusNotifierWatcher not on the session bus" >&2
-                return 1
-                ;;
-            esac
-            set +e
-            if [ -n "${wrap}" ]; then
-              ${wrap} flatpak-builder --run build-dir io.github.viniciosrab.GrokBot.yml /app/bin/grok-bot-companion >x3-launch.log 2>&1 &
-            else
-              flatpak-builder --run build-dir io.github.viniciosrab.GrokBot.yml /app/bin/grok-bot-companion >x3-launch.log 2>&1 &
-            fi
-            local pid=$!
-            sleep 8
-            if kill -0 "${pid}" 2>/dev/null; then
-              kill "${pid}" 2>/dev/null || true
-              wait "${pid}" 2>/dev/null || true
-              set -e
-              cat x3-launch.log
-              echo "X3 launch proof: PASS — watcher-verified companion stayed up (tray process)"
-              return 0
-            fi
-            wait "${pid}"
-            local rc=$?
-            set -e
-            cat x3-launch.log
-            echo "X3 launch proof FAILED: companion exited ${rc}" >&2
-            return 1
-          }
-          if [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
-            echo "graphical session detected; attempting X3 Electron/zypak launch proof"
-            prove_x3 ""
-          elif command -v xvfb-run >/dev/null 2>&1; then
-            echo "no graphical session; attempting X3 launch under xvfb-run (still requires a StatusNotifierWatcher)"
-            prove_x3 "xvfb-run -a" || { echo "This architecture is NOT validated for X3. Failing closed." >&2; exit 1; }
-          else
-            echo "X3 launch proof UNPROVEN: no graphical KDE session (DISPLAY and WAYLAND_DISPLAY unset) and no xvfb-run on this runner" >&2
-            echo "This architecture is NOT validated for X3. Failing closed." >&2
-            exit 1
-          fi
+          sudo apt-get update
+          sudo apt-get install -y plasma-workspace xvfb dbus-x11
+
+      - name: X3 launch proof — Electron/zypak on KDE 6.11 (fail-closed, hosted)
+        run: |
+          set -euo pipefail
+          # Single shared proof for both architectures. tools/prove_x3.sh
+          # runs real plasmashell on Xvfb with owner proof and zombie-safe
+          # observation; any failure exits nonzero so publish never runs.
+          bash tools/prove_x3.sh
