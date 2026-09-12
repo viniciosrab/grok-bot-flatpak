@@ -91,6 +91,53 @@ activity_owned() {
     return 1
   fi
 }
+# KDED ownership uses the same GetNameOwner semantics. The real
+# StatusNotifierWatcher is a KDED module (statusnotifierwatcher), so the
+# watcher never gains an owner unless org.kde.kded5 is owned first.
+kded_owned() {
+  if command -v busctl >/dev/null 2>&1; then
+    if busctl --user get-name-owner org.kde.kded5 >/dev/null 2>&1; then
+      return 0
+    fi
+    if busctl --user call org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus GetNameOwner s org.kde.kded5 >/dev/null 2>&1; then
+      return 0
+    fi
+    return 1
+  elif command -v gdbus >/dev/null 2>&1; then
+    if gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.GetNameOwner org.kde.kded5 >/dev/null 2>&1; then
+      return 0
+    fi
+    return 1
+  elif command -v dbus-send >/dev/null 2>&1; then
+    if dbus-send --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.GetNameOwner string:org.kde.kded5 >/dev/null 2>&1; then
+      return 0
+    fi
+    return 1
+  else
+    echo "X3 launch proof UNPROVEN: no D-Bus probe (busctl/gdbus/dbus-send) to verify KDED ownership" >&2
+    return 1
+  fi
+}
+# Demand-load the real watcher module through the real KDED API.
+# Best effort: the watcher wait below stays fail-closed, so a missed load
+# still exits UNPROVEN instead of passing.
+kded_load_watcher() {
+  if command -v qdbus >/dev/null 2>&1; then
+    qdbus org.kde.kded5 /kded org.kde.kded5.loadModule statusnotifierwatcher >/dev/null 2>&1
+    return 0
+  elif command -v busctl >/dev/null 2>&1; then
+    busctl --user call org.kde.kded5 /kded org.kde.kded5 loadModule s statusnotifierwatcher >/dev/null 2>&1
+    return 0
+  elif command -v gdbus >/dev/null 2>&1; then
+    gdbus call --session --dest org.kde.kded5 --object-path /kded --method org.kde.kded5.loadModule statusnotifierwatcher >/dev/null 2>&1
+    return 0
+  elif command -v dbus-send >/dev/null 2>&1; then
+    dbus-send --session --print-reply --dest=org.kde.kded5 /kded org.kde.kded5.loadModule string:statusnotifierwatcher >/dev/null 2>&1
+    return 0
+  else
+    return 1
+  fi
+}
 # Zombie-safe liveness: kill -0 alone passes for zombies, so also
 # reject Z state via /proc and ps.
 companion_alive() {
@@ -174,11 +221,55 @@ if [ "${ACTIVITY_OK}" != 1 ]; then
   exit 1
 fi
 echo "ActivityManager owned on the session bus (real kactivitymanagerd)"
+# The real StatusNotifierWatcher is a KDED module: D-Bus activation alone
+# leaves org.kde.kded5 briefly present but the watcher ownerless, so start
+# the real kded5 persistently before plasmashell and demand-load the real
+# statusnotifierwatcher module. Resolve the binary from the authoritative
+# D-Bus service file, which is architecture-independent.
+KDED_BIN="$(command -v kded5 2>/dev/null || true)"
+if [ -z "${KDED_BIN}" ]; then
+  KDED_BIN="$(awk '/^Exec=/{sub(/^Exec=/, ""); print $1; exit}' /usr/share/dbus-1/services/org.kde.kded5.service 2>/dev/null || true)"
+fi
+if [ -z "${KDED_BIN}" ] || [ ! -x "${KDED_BIN}" ]; then
+  echo "X3 launch proof UNPROVEN: kded5 binary not found (tried PATH and org.kde.kded5.service Exec)" >&2
+  exit 1
+fi
+"${KDED_BIN}" >kded.log 2>&1 &
+KDED_PID=$!
+trap 'kill "${ACTIVITY_PID}" 2>/dev/null || true; kill "${KDED_PID}" 2>/dev/null || true; kill "${PLASMA_PID}" 2>/dev/null || true' EXIT
+if ! kill -0 "${KDED_PID}" 2>/dev/null; then
+  echo "X3 launch proof UNPROVEN: kded5 failed to start" >&2
+  cat kded.log || true
+  exit 1
+fi
+KDED_OK=0
+for i in $(seq 1 30); do
+  if kded_owned; then
+    KDED_OK=1
+    break
+  fi
+  if ! kill -0 "${KDED_PID}" 2>/dev/null; then
+    echo "X3 launch proof UNPROVEN: kded5 exited before org.kde.kded5 was owned" >&2
+    cat kded.log || true
+    exit 1
+  fi
+  sleep 2
+done
+if [ "${KDED_OK}" != 1 ]; then
+  echo "X3 launch proof UNPROVEN: org.kde.kded5 has no owner after kded5 start" >&2
+  cat kded.log || true
+  exit 1
+fi
+echo "KDED owned on the session bus (real kded5)"
+if ! kded_load_watcher; then
+  echo "KDED module load probe unavailable; continuing to watcher wait (fail-closed)" >&2
+fi
 plasmashell --no-respawn >plasmashell.log 2>&1 &
 PLASMA_PID=$!
 if ! kill -0 "${PLASMA_PID}" 2>/dev/null; then
   echo "X3 launch proof UNPROVEN: plasmashell failed to start" >&2
   cat kactivitymanagerd.log || true
+  cat kded.log || true
   cat plasmashell.log || true
   exit 1
 fi
@@ -191,6 +282,13 @@ for i in $(seq 1 60); do
   if ! kill -0 "${PLASMA_PID}" 2>/dev/null; then
     echo "X3 launch proof UNPROVEN: plasmashell exited before the watcher was owned" >&2
     cat kactivitymanagerd.log || true
+    cat kded.log || true
+    cat plasmashell.log || true
+    exit 1
+  fi
+  if ! kill -0 "${KDED_PID}" 2>/dev/null; then
+    echo "X3 launch proof UNPROVEN: kded5 exited before the watcher was owned" >&2
+    cat kded.log || true
     cat plasmashell.log || true
     exit 1
   fi
@@ -199,6 +297,7 @@ done
 if [ "${WATCHER_OK}" != 1 ]; then
   echo "X3 launch proof UNPROVEN: org.kde.StatusNotifierWatcher has no owner after plasmashell start" >&2
   cat kactivitymanagerd.log || true
+  cat kded.log || true
   cat plasmashell.log || true
   exit 1
 fi
@@ -238,12 +337,20 @@ prove_x3
 if ! kill -0 "${PLASMA_PID}" 2>/dev/null; then
   echo "X3 launch proof FAILED: plasmashell died during observation" >&2
   cat kactivitymanagerd.log || true
+  cat kded.log || true
+  cat plasmashell.log || true
+  exit 1
+fi
+if ! kill -0 "${KDED_PID}" 2>/dev/null; then
+  echo "X3 launch proof FAILED: kded5 died during observation" >&2
+  cat kded.log || true
   cat plasmashell.log || true
   exit 1
 fi
 if ! kill -0 "${ACTIVITY_PID}" 2>/dev/null; then
   echo "X3 launch proof FAILED: kactivitymanagerd died during observation" >&2
   cat kactivitymanagerd.log || true
+  cat kded.log || true
   cat plasmashell.log || true
   exit 1
 fi
