@@ -511,6 +511,8 @@ class AtomicContentContractTests(unittest.TestCase):
         self.assertIn("plasmashell", text)
         self.assertIn("kactivitymanagerd", text)
         self.assertIn("org.kde.ActivityManager", text)
+        self.assertIn("org.kde.ActivityManager.service", text)
+        self.assertIn("KAMD_BIN", text)
         self.assertIn("activity_owned", text)
         self.assertIn("Xvfb", text)
         self.assertIn("DISPLAY", text)

@@ -10,9 +10,13 @@ successful validate on main -> automatic hosted X3 -> publish. The first
 automatic X3 run failed fail-closed on both architectures because
 `plasmashell` aborted shell load without a running `kactivitymanagerd`,
 so `org.kde.StatusNotifierWatcher` never gained an owner and publish
-correctly skipped. This branch starts the real activity manager before
-`plasmashell` and waits for `org.kde.ActivityManager` ownership first.
-`strict_tdd` remains `false` per the change contract.
+correctly skipped. PR #4 started the daemon before `plasmashell` but
+failed fail-closed again with `kactivitymanagerd: command not found`:
+the daemon binary is not on PATH, it lives under
+`/usr/lib/<arch>/libexec`. This branch resolves it from the
+authoritative `org.kde.ActivityManager.service` D-Bus service file
+(architecture-independent) and waits for `org.kde.ActivityManager`
+ownership first. `strict_tdd` remains `false` per the change contract.
 
 ## Read first
 
