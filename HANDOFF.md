@@ -27,7 +27,7 @@ Do not restate these decisions in new planning documents. Link to the relevant a
 - The application recognizes `SAND_DISABLE_UPDATES=1`; the Flatpak sets it so `flatpak update` remains the sole update authority.
 - The verified Grok Bot 0.47.0 `x86_64` and `aarch64` Upstream Artifacts do not provide a system tray item: neither Electron main-process bundle constructs `Tray` or references StatusNotifierItem, and both use the same Linux `window-all-closed` handler that calls `app.quit()`.
 - The Unofficial Flatpak therefore ships a companion StatusNotifierItem (`companion/src/main.cpp`). It remains available after Grok Bot exits, relaunches the application through show, and terminates both through quit; see ADR 0003. Absence of `StatusNotifierWatcher` exits nonzero; there is no trayless fallback.
- - The manifest builds on `org.kde.Platform`/`org.kde.Sdk` 6.11 with zypak as a module (not an Electron BaseApp base). X3 graphical launch proof remains unproven: it still needs a real graphical KDE session. CI proves the build plus the watcher-gate rejection headlessly, but that rejection is a negative test only and is NOT X3 launch success; the X3 step in `validate.yml` fails closed until graphical launch evidence exists, so neither architecture is X3-validated yet.
+ - The manifest builds on `org.kde.Platform`/`org.kde.Sdk` 6.11 with zypak as a module (not an Electron BaseApp base). X3 graphical launch proof remains unproven: it still needs a real graphical KDE session. `validate.yml` proves the dual-arch build plus the watcher-gate rejection headlessly (`QT_QPA_PLATFORM=offscreen` negative test only, NOT X3 launch success); positive X3 proof is the manual-only `x3` workflow (dual-arch, fail-closed, never auto-required on PRs), and `publish.yml` runs only after a successful `x3` run on `main`, so neither architecture is X3-validated yet.
 - GitHub Pages currently limits a published site to 1 GB and has a soft bandwidth limit of 100 GB per month. Revalidate these limits before the first publication.
 - Public GitHub-hosted native ARM Linux runners were available under `ubuntu-24.04-arm` during this session.
 - Workflow-created PRs using the repository `GITHUB_TOKEN` enter an approval-required state. The design therefore requires a dedicated, least-privilege GitHub App with short-lived installation tokens.
@@ -46,7 +46,7 @@ name these secrets only and fail closed while any is missing:
 ## Rollback boundary
 
 - Before merge: revert the uncommitted worktree (`git status` shows only the new implementation files plus this handoff).
-- After merge, before publication: a failed validation publishes nothing; fix forward on the pin or payload side.
+- After merge, before publication: a failed validation or missing X3 proof publishes nothing (`publish.yml` listens to successful `x3` runs only); fix forward on the pin or payload side.
 - After publication: never publish one architecture. Republish the newest `flatpak/deployed-<version>-rN` marker's current-only OSTree as the recovery target; `flatpak/<version>-rN` release tags and GitHub Releases hold the audit inputs.
 
 ## User constraints

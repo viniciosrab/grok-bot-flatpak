@@ -1,7 +1,7 @@
-# Publish job: one Atomic Flatpak Release after all validation passes.
+# Publish job: one Atomic Flatpak Release after explicit X3 proof passes.
 #
-# Signing and Pages publication run only when the validate workflow
-# concluded with success on a push to the default branch. Each architecture rebuilds
+# Signing and Pages publication run only when the manual x3 workflow
+# concluded with success for the default branch. Each architecture rebuilds
 # its own OSTree repo from the validated commit; the release job merges
 # both into one current-only site repo, signs it, prunes history, tags the
 # release for audit and rollback, and deploys to the Flatpak Repository on
@@ -14,7 +14,7 @@ name: publish
 
 on:
   workflow_run:
-    workflows: [validate]
+    workflows: [x3]
     types: [completed]
     branches: [main]
 
@@ -27,10 +27,10 @@ concurrency:
 
 jobs:
   build-x86_64:
-    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     steps:
-      - name: Check out the validated commit
+      - name: Check out the X3-proven commit
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
@@ -51,10 +51,10 @@ jobs:
           path: repo
 
   build-aarch64:
-    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04-arm
     steps:
-      - name: Check out the validated commit
+      - name: Check out the X3-proven commit
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
@@ -76,7 +76,7 @@ jobs:
 
   release:
     needs: [build-x86_64, build-aarch64]
-    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' }}
+    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_dispatch' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -85,7 +85,7 @@ jobs:
     environment:
       name: github-pages
     steps:
-      - name: Check out the validated commit
+      - name: Check out the X3-proven commit
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}

@@ -1,17 +1,18 @@
-# Validate job: dual-architecture build plus payload and launch proof.
+# Validate job: dual-architecture payload build validation (NOT X3 proof).
 #
 # Both architectures build natively (x86_64 on ubuntu-24.04, aarch64 on
 # ubuntu-24.04-arm) with fail-fast disabled so each arch reports its own
-# verdict. Any source, payload, or runtime failure fails that architecture
-# and blocks the atomic publish gate. Nothing here publishes.
+# verdict. Any source, payload, or negative-gate failure fails that
+# architecture. Nothing here publishes.
 #
-# X3 contract (design: Electron/zypak on KDE 6.11): an architecture counts
-# as X3-validated ONLY when the X3 launch-proof step below observes a real
-# graphical KDE launch (exit 0). The watcher-gate rejection step is a
-# negative test — it proves the companion fails closed without a
-# StatusNotifierWatcher — and MUST NEVER be read as X3 launch success.
-# Headless runners fail the X3 step closed (UNPROVEN); the arch stays
-# unvalidated until graphical launch evidence exists.
+# X3 contract (design: Electron/zypak on KDE 6.11): positive X3 graphical
+# proof lives ONLY in the separate manual `x3` workflow, which never runs
+# automatically on pull requests. The watcher-gate rejection step below is
+# a negative test — it proves the companion fails closed without a
+# StatusNotifierWatcher — and MUST NEVER be read as X3 launch success. It
+# runs headless with QT_QPA_PLATFORM=offscreen so Qt constructs without a
+# display and the companion reaches the real missing-watcher path (exit 1
+# with StatusNotifierWatcher evidence) instead of dying in the xcb plugin.
 
 name: validate
 
@@ -78,80 +79,22 @@ jobs:
           test -x build-dir/files/bin/grok-bot-companion || { echo "missing companion binary" >&2; exit 1; }
 
       - name: Prove the watcher gate rejects a watcherless session (NOT X3 launch proof)
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: |
           set -euo pipefail
+          # Headless Qt needs a display-independent platform so QApplication
+          # constructs and the companion reaches the real missing-watcher
+          # path instead of dying in the xcb plugin with no display.
           set +e
-          timeout 60 dbus-run-session -- flatpak-builder --run build-dir io.github.viniciosrab.GrokBot.yml /app/bin/grok-bot-companion >launch.log 2>&1
+          timeout 60 dbus-run-session -- flatpak-builder --run build-dir io.github.viniciosrab.GrokBot.yml env QT_QPA_PLATFORM=offscreen /app/bin/grok-bot-companion >launch.log 2>&1
           RC=$?
           set -e
           cat launch.log
           grep -q 'StatusNotifierWatcher' launch.log || { echo "watcher gate went silent" >&2; exit 1; }
           test "${RC}" -eq 1 || { echo "headless launch must fail closed at the watcher gate" >&2; exit 1; }
           echo "NEGATIVE TEST ONLY: companion rejects a watcherless session with exit 1."
-          echo "This is NOT X3 launch proof and does NOT validate this architecture for X3."
-
-      - name: X3 launch proof — Electron/zypak on KDE 6.11 (fail-closed)
-        run: |
-          set -euo pipefail
-          # X3: companion is a long-running tray. PASS only with positive
-          # proof of org.kde.StatusNotifierWatcher on the session bus AND
-          # the companion staying alive under it; exit 0 is not expected.
-          prove_x3() {
-            local wrap="$1"
-            local bus_names=""
-            if command -v busctl >/dev/null 2>&1; then
-              bus_names="$(busctl --user list 2>/dev/null || true)"
-            elif command -v gdbus >/dev/null 2>&1; then
-              bus_names="$(gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.ListNames 2>/dev/null || true)"
-            elif command -v dbus-send >/dev/null 2>&1; then
-              bus_names="$(dbus-send --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ListNames 2>/dev/null || true)"
-            else
-              echo "X3 launch proof UNPROVEN: no D-Bus probe (busctl/gdbus/dbus-send) to verify StatusNotifierWatcher" >&2
-              return 1
-            fi
-            case "${bus_names}" in
-              *org.kde.StatusNotifierWatcher*)
-                echo "StatusNotifierWatcher present on the session bus"
-                ;;
-              *)
-                echo "X3 launch proof UNPROVEN: org.kde.StatusNotifierWatcher not on the session bus" >&2
-                return 1
-                ;;
-            esac
-            set +e
-            if [ -n "${wrap}" ]; then
-              ${wrap} flatpak-builder --run build-dir io.github.viniciosrab.GrokBot.yml /app/bin/grok-bot-companion >x3-launch.log 2>&1 &
-            else
-              flatpak-builder --run build-dir io.github.viniciosrab.GrokBot.yml /app/bin/grok-bot-companion >x3-launch.log 2>&1 &
-            fi
-            local pid=$!
-            sleep 8
-            if kill -0 "${pid}" 2>/dev/null; then
-              kill "${pid}" 2>/dev/null || true
-              wait "${pid}" 2>/dev/null || true
-              set -e
-              cat x3-launch.log
-              echo "X3 launch proof: PASS — watcher-verified companion stayed up (tray process)"
-              return 0
-            fi
-            wait "${pid}"
-            local rc=$?
-            set -e
-            cat x3-launch.log
-            echo "X3 launch proof FAILED: companion exited ${rc}" >&2
-            return 1
-          }
-          if [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
-            echo "graphical session detected; attempting X3 Electron/zypak launch proof"
-            prove_x3 ""
-          elif command -v xvfb-run >/dev/null 2>&1; then
-            echo "no graphical session; attempting X3 launch under xvfb-run (still requires a StatusNotifierWatcher)"
-            prove_x3 "xvfb-run -a" || { echo "This architecture is NOT validated for X3. Failing closed." >&2; exit 1; }
-          else
-            echo "X3 launch proof UNPROVEN: no graphical KDE session (DISPLAY and WAYLAND_DISPLAY unset) and no xvfb-run on this runner" >&2
-            echo "This architecture is NOT validated for X3. Failing closed." >&2
-            exit 1
-          fi
+          echo "This is NOT X3 launch proof. Positive X3 proof runs only in the manual x3 workflow."
 
   build-aarch64:
     runs-on: ubuntu-24.04-arm
@@ -195,77 +138,19 @@ jobs:
           test -x build-dir/files/bin/grok-bot-companion || { echo "missing companion binary" >&2; exit 1; }
 
       - name: Prove the watcher gate rejects a watcherless session (NOT X3 launch proof)
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: |
           set -euo pipefail
+          # Headless Qt needs a display-independent platform so QApplication
+          # constructs and the companion reaches the real missing-watcher
+          # path instead of dying in the xcb plugin with no display.
           set +e
-          timeout 60 dbus-run-session -- flatpak-builder --run build-dir io.github.viniciosrab.GrokBot.yml /app/bin/grok-bot-companion >launch.log 2>&1
+          timeout 60 dbus-run-session -- flatpak-builder --run build-dir io.github.viniciosrab.GrokBot.yml env QT_QPA_PLATFORM=offscreen /app/bin/grok-bot-companion >launch.log 2>&1
           RC=$?
           set -e
           cat launch.log
           grep -q 'StatusNotifierWatcher' launch.log || { echo "watcher gate went silent" >&2; exit 1; }
           test "${RC}" -eq 1 || { echo "headless launch must fail closed at the watcher gate" >&2; exit 1; }
           echo "NEGATIVE TEST ONLY: companion rejects a watcherless session with exit 1."
-          echo "This is NOT X3 launch proof and does NOT validate this architecture for X3."
-
-      - name: X3 launch proof — Electron/zypak on KDE 6.11 (fail-closed)
-        run: |
-          set -euo pipefail
-          # X3: companion is a long-running tray. PASS only with positive
-          # proof of org.kde.StatusNotifierWatcher on the session bus AND
-          # the companion staying alive under it; exit 0 is not expected.
-          prove_x3() {
-            local wrap="$1"
-            local bus_names=""
-            if command -v busctl >/dev/null 2>&1; then
-              bus_names="$(busctl --user list 2>/dev/null || true)"
-            elif command -v gdbus >/dev/null 2>&1; then
-              bus_names="$(gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.ListNames 2>/dev/null || true)"
-            elif command -v dbus-send >/dev/null 2>&1; then
-              bus_names="$(dbus-send --session --print-reply --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ListNames 2>/dev/null || true)"
-            else
-              echo "X3 launch proof UNPROVEN: no D-Bus probe (busctl/gdbus/dbus-send) to verify StatusNotifierWatcher" >&2
-              return 1
-            fi
-            case "${bus_names}" in
-              *org.kde.StatusNotifierWatcher*)
-                echo "StatusNotifierWatcher present on the session bus"
-                ;;
-              *)
-                echo "X3 launch proof UNPROVEN: org.kde.StatusNotifierWatcher not on the session bus" >&2
-                return 1
-                ;;
-            esac
-            set +e
-            if [ -n "${wrap}" ]; then
-              ${wrap} flatpak-builder --run build-dir io.github.viniciosrab.GrokBot.yml /app/bin/grok-bot-companion >x3-launch.log 2>&1 &
-            else
-              flatpak-builder --run build-dir io.github.viniciosrab.GrokBot.yml /app/bin/grok-bot-companion >x3-launch.log 2>&1 &
-            fi
-            local pid=$!
-            sleep 8
-            if kill -0 "${pid}" 2>/dev/null; then
-              kill "${pid}" 2>/dev/null || true
-              wait "${pid}" 2>/dev/null || true
-              set -e
-              cat x3-launch.log
-              echo "X3 launch proof: PASS — watcher-verified companion stayed up (tray process)"
-              return 0
-            fi
-            wait "${pid}"
-            local rc=$?
-            set -e
-            cat x3-launch.log
-            echo "X3 launch proof FAILED: companion exited ${rc}" >&2
-            return 1
-          }
-          if [ -n "${DISPLAY:-}" ] || [ -n "${WAYLAND_DISPLAY:-}" ]; then
-            echo "graphical session detected; attempting X3 Electron/zypak launch proof"
-            prove_x3 ""
-          elif command -v xvfb-run >/dev/null 2>&1; then
-            echo "no graphical session; attempting X3 launch under xvfb-run (still requires a StatusNotifierWatcher)"
-            prove_x3 "xvfb-run -a" || { echo "This architecture is NOT validated for X3. Failing closed." >&2; exit 1; }
-          else
-            echo "X3 launch proof UNPROVEN: no graphical KDE session (DISPLAY and WAYLAND_DISPLAY unset) and no xvfb-run on this runner" >&2
-            echo "This architecture is NOT validated for X3. Failing closed." >&2
-            exit 1
-          fi
+          echo "This is NOT X3 launch proof. Positive X3 proof runs only in the manual x3 workflow."

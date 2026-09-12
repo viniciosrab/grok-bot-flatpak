@@ -341,6 +341,9 @@ class ZypakSubmoduleContractTests(unittest.TestCase):
 VALIDATE_WORKFLOW_PATH = os.path.join(
     REPO_ROOT, ".github", "workflows", "validate.yml"
 )
+X3_WORKFLOW_PATH = os.path.join(
+    REPO_ROOT, ".github", "workflows", "x3.yml"
+)
 PUBLISH_WORKFLOW_PATH = os.path.join(
     REPO_ROOT, ".github", "workflows", "publish.yml"
 )
@@ -450,6 +453,35 @@ class AtomicContentContractTests(unittest.TestCase):
         self.assertIn("grok-bot-companion", text)
         self.assertIn("launch", text.lower())
 
+    def test_validate_has_no_positive_x3_proof(self):
+        text = read_repo_text(VALIDATE_WORKFLOW_PATH)
+        self.assertNotIn("prove_x3", text)
+        self.assertIn("NOT X3 launch proof", text)
+
+    def test_validate_negative_gate_uses_offscreen_and_fails_closed(self):
+        text = read_repo_text(VALIDATE_WORKFLOW_PATH)
+        self.assertIn("QT_QPA_PLATFORM", text)
+        self.assertIn("offscreen", text)
+        self.assertIn(WATCHER_NAME, text)
+        self.assertIn('test "${RC}" -eq 1', text)
+
+    def test_x3_workflow_is_manual_dual_arch_fail_closed(self):
+        self.assertTrue(os.path.isfile(X3_WORKFLOW_PATH))
+        text = read_repo_text(X3_WORKFLOW_PATH)
+        self.assertIn("workflow_dispatch", text)
+        self.assertNotIn("pull_request", text)
+        self.assertNotIn("push:", text)
+        self.assertIn("ubuntu-24.04-arm", text)
+        self.assertIn("ubuntu-24.04", text)
+        self.assertIn("x86_64", text)
+        self.assertIn("aarch64", text)
+        self.assertIn("prove_x3", text)
+        self.assertIn("busctl", text)
+        self.assertIn(WATCHER_NAME, text)
+        self.assertIn("UNPROVEN", text)
+        self.assertIn("exit 1", text)
+        self.assertNotIn("continue-on-error: true", text)
+
     def test_validate_fails_arch_on_source_failure(self):
         text = read_repo_text(VALIDATE_WORKFLOW_PATH)
         self.assertIn("sha256sum", text)
@@ -470,9 +502,13 @@ class AtomicContentContractTests(unittest.TestCase):
     def test_publish_gates_on_all_validation(self):
         self.assertTrue(os.path.isfile(PUBLISH_WORKFLOW_PATH))
         text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        self.assertIn("workflows: [x3]", text)
+        self.assertNotIn("workflows: [validate]", text)
         self.assertIn("x86_64", text)
         self.assertIn("aarch64", text)
         self.assertIn("success", text)
+        self.assertIn("workflow_dispatch", text)
+        self.assertNotIn("event == 'push'", text)
         for secret in REQUIRED_PUBLISH_SECRETS:
             self.assertIn(f"secrets.{secret}", text)
         self.assertIn("exit 1", text)
@@ -507,7 +543,7 @@ class AtomicContentContractTests(unittest.TestCase):
         self.assertIn("cancel-in-progress: false", text)
 
     def test_workflows_use_sudo_for_flatpak_system_ops(self):
-        for path in (VALIDATE_WORKFLOW_PATH, PUBLISH_WORKFLOW_PATH):
+        for path in (VALIDATE_WORKFLOW_PATH, X3_WORKFLOW_PATH, PUBLISH_WORKFLOW_PATH):
             with self.subTest(path=path):
                 text = read_repo_text(path)
                 for lineno, line in enumerate(text.splitlines(), 1):
