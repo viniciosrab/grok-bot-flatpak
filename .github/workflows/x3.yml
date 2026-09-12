@@ -5,8 +5,9 @@
 # manual workflow_dispatch run for diagnosis. Each architecture runs on
 # GitHub-hosted runners (x86_64 on ubuntu-24.04, aarch64 on
 # ubuntu-24.04-arm) and calls the single shared tools/prove_x3.sh proof,
-# which starts a real KDE Plasma plasmashell process on Xvfb under a real
-# D-Bus session, proves ownership of the real
+# which starts the real kactivitymanagerd before a real KDE Plasma
+# plasmashell process on Xvfb under a real D-Bus session, proves ownership
+# of the real
 # org.kde.StatusNotifierWatcher name via GetNameOwner, then launches the
 # Packaged Payload through the companion and proves the companion stays
 # alive with zombie-safe observation and process-group cleanup. No watcher
@@ -90,7 +91,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y plasma-workspace xvfb dbus-x11
+          sudo apt-get install -y plasma-workspace xvfb dbus-x11 kactivitymanagerd
 
       - name: X3 launch proof — Electron/zypak on KDE 6.11 (fail-closed, hosted)
         run: |
@@ -139,7 +140,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y plasma-workspace xvfb dbus-x11
+          sudo apt-get install -y plasma-workspace xvfb dbus-x11 kactivitymanagerd
 
       - name: X3 launch proof — Electron/zypak on KDE 6.11 (fail-closed, hosted)
         run: |
