@@ -194,7 +194,9 @@ def check_electron_exec(manifest_text, desktop_text):
     ]
     if wm_class_lines != ["StartupWMClass=grok-bot"]:
         return False
-    return "--password-store=basic" in manifest_text
+    if "--password-store=basic" not in manifest_text:
+        return False
+    return "CHROME_DESKTOP=io.github.viniciosrab.GrokBot.desktop" in manifest_text
 
 
 def check_kde_electron_runtime(manifest_text, companion_src):
@@ -213,6 +215,8 @@ def check_kde_electron_runtime(manifest_text, companion_src):
         "org.kde.StatusNotifierItem-",
         'setIconByName(QStringLiteral("io.github.viniciosrab.GrokBot"))',
         "setIconByPixmap",
+        "QSize(22, 22)",
+        "hicolor/24x24/apps/io.github.viniciosrab.GrokBot.png",
     ):
         if required not in companion_src:
             return False

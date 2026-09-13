@@ -82,7 +82,7 @@ modules:
         ELECTRON_ENTRY="$(cat electron-entry.txt)"
         install -d /app/bin /app/grok-bot /app/share/icons/hicolor
         cp -a grok-bot-unpacked/. /app/grok-bot/
-        printf '#!/bin/sh\nexec /app/bin/zypak-wrapper "/app/grok-bot/%s" --password-store=basic "$@"\n' "${ELECTRON_ENTRY}" > /app/bin/grok-bot-electron
+        printf '#!/bin/sh\nexport CHROME_DESKTOP=io.github.viniciosrab.GrokBot.desktop\nexec /app/bin/zypak-wrapper "/app/grok-bot/%s" --password-store=basic "$@"\n' "${ELECTRON_ENTRY}" > /app/bin/grok-bot-electron
         chmod 755 /app/bin/grok-bot-electron
         cp -a grok-bot-unpacked/usr/share/icons/hicolor/. /app/share/icons/hicolor/
         find /app/share/icons/hicolor -type f -name grok-bot.png | while read -r src; do
