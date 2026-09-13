@@ -16,6 +16,8 @@
   <icon type="stock">io.github.viniciosrab.GrokBot</icon>
   <provides>
     <binary>grok-bot-companion</binary>
+    <mediatype>x-scheme-handler/grokbot</mediatype>
+    <mediatype>x-scheme-handler/sand</mediatype>
   </provides>
   <releases>
     <release version="0.47.0" date="2026-09-09"/>

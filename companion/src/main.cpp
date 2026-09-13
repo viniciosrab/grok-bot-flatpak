@@ -20,6 +20,8 @@
 #include <QDBusConnection>
 #include <QDBusConnectionInterface>
 #include <QDir>
+#include <QElapsedTimer>
+#include <QFile>
 #include <QFileInfo>
 #include <QIcon>
 #include <QLockFile>
@@ -29,11 +31,15 @@
 #include <QSize>
 #include <QStandardPaths>
 #include <QStringList>
+#include <QTimer>
 #include <KStatusNotifierItem>
 
 #ifdef Q_OS_UNIX
 #include <signal.h>
+#include <string.h>
+#include <sys/socket.h>
 #include <sys/types.h>
+#include <sys/un.h>
 #include <unistd.h>
 #endif
 
@@ -43,6 +49,75 @@ constexpr char kWatcherService[] = "org.kde.StatusNotifierWatcher";
 constexpr char kBusIdentityPrefix[] = "org.kde.StatusNotifierItem-";
 constexpr char kDefaultElectronPath[] = "/app/bin/grok-bot-electron";
 constexpr char kElectronEnvVar[] = "GROK_BOT_ELECTRON";
+constexpr char kElectronUserDataDirName[] = "Grok Bot";
+constexpr char kElectronSingletonSocketName[] = "SingletonSocket";
+constexpr int kColdProtocolSocketPollMs = 50;
+constexpr int kColdProtocolReadyTimeoutMs = 15000;
+
+QString electronSingletonSocketPath()
+{
+    const QString configHome = QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation);
+    return QDir(QDir(configHome).filePath(QString::fromLatin1(kElectronUserDataDirName)))
+        .filePath(QString::fromLatin1(kElectronSingletonSocketName));
+}
+
+QString resolvedSymlinkPath(const QString &linkPath)
+{
+#ifdef Q_OS_UNIX
+    const QByteArray encoded = QFile::encodeName(linkPath);
+    char buf[4096];
+    const ssize_t n = ::readlink(encoded.constData(), buf, sizeof(buf) - 1);
+    if (n <= 0) {
+        return QString();
+    }
+    const QString target = QFile::decodeName(QByteArray(buf, static_cast<int>(n)));
+    if (QDir::isAbsolutePath(target)) {
+        return target;
+    }
+    return QDir(QFileInfo(linkPath).absolutePath()).absoluteFilePath(target);
+#else
+    Q_UNUSED(linkPath);
+    return QString();
+#endif
+}
+
+bool unixSocketIsLive(const QString &socketPath)
+{
+#ifdef Q_OS_UNIX
+    // Probe liveness only: connect and close. Do not write protocol bytes.
+    const QByteArray encoded = QFile::encodeName(socketPath);
+    sockaddr_un addr{};
+    if (encoded.isEmpty() || static_cast<size_t>(encoded.size()) >= sizeof(addr.sun_path)) {
+        return false;
+    }
+
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return false;
+    }
+
+    addr.sun_family = AF_UNIX;
+    ::memcpy(addr.sun_path, encoded.constData(), static_cast<size_t>(encoded.size()));
+
+    const int rc = ::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr));
+    ::close(fd);
+    return rc == 0;
+#else
+    Q_UNUSED(socketPath);
+    return false;
+#endif
+}
+
+bool electronSingleInstanceReady()
+{
+    const QString socketPath = electronSingletonSocketPath();
+    const QFileInfo info(socketPath);
+    if (info.isSymLink()) {
+        const QString target = resolvedSymlinkPath(socketPath);
+        return !target.isEmpty() && unixSocketIsLive(target);
+    }
+    return info.exists() && unixSocketIsLive(info.absoluteFilePath());
+}
 
 bool watcherAvailable()
 {
@@ -83,14 +158,16 @@ QString resolveElectronCommand(const QApplication &app)
     return QString::fromLatin1(kDefaultElectronPath);
 }
 
-void forwardProtocolUrls(const QString &electronCommand, const QStringList &urls)
+bool forwardProtocolUrls(const QString &electronCommand, const QStringList &urls)
 {
     if (urls.isEmpty()) {
-        return;
+        return true;
     }
     if (!QProcess::startDetached(electronCommand, urls)) {
         qWarning("grok-bot-companion: failed to forward protocol URL to %s", qPrintable(electronCommand));
+        return false;
     }
+    return true;
 }
 
 } // namespace
@@ -106,11 +183,16 @@ public:
         , m_electronCommand(electronCommand)
         , m_child(new QProcess(this))
         , m_ownProcessGroup(false)
+        , m_coldDeliveryScheduled(false)
     {
         connect(m_child, &QProcess::finished, this, &CompanionController::childFinished);
+        connect(m_child, &QProcess::started, this, &CompanionController::childStarted);
         connect(m_child, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
-            Q_UNUSED(error);
             qWarning("grok-bot-companion: child process error: %s", qPrintable(m_child->errorString()));
+            if (error == QProcess::FailedToStart && !m_pendingProtocolUrls.isEmpty()) {
+                qWarning("grok-bot-companion: failed to deliver protocol URL");
+                m_pendingProtocolUrls.clear();
+            }
         });
         connect(m_tray, &KStatusNotifierItem::activateRequested, this, &CompanionController::showRequested);
         connect(m_tray, &KStatusNotifierItem::quitRequested, this, &CompanionController::quitRequested);
@@ -118,7 +200,14 @@ public:
 
     void start(const QStringList &protocolUrls = {})
     {
-        startChild(protocolUrls);
+        // Upstream Electron does not consume grokbot:/sand: from the first
+        // process argv for auth, so a cold-start callback in startChild()
+        // would be dropped. Launch with a clean argv; after QProcess::started
+        // wait for Electron's single-instance socket, then forward once
+        // (the same path as a warm losing-lock forward).
+        m_pendingProtocolUrls = protocolUrls;
+        m_coldDeliveryScheduled = false;
+        startChild();
     }
 
 private slots:
@@ -140,6 +229,16 @@ private slots:
         qApp->quit();
     }
 
+    void childStarted()
+    {
+        if (m_pendingProtocolUrls.isEmpty() || m_coldDeliveryScheduled) {
+            return;
+        }
+        m_coldDeliveryScheduled = true;
+        m_coldReadyClock.start();
+        QTimer::singleShot(0, this, &CompanionController::deliverColdProtocolUrls);
+    }
+
     void childFinished(int exitCode, QProcess::ExitStatus status)
     {
         Q_UNUSED(exitCode);
@@ -147,8 +246,31 @@ private slots:
         // The companion stays up so Show can relaunch the application.
     }
 
+    void deliverColdProtocolUrls()
+    {
+        if (m_pendingProtocolUrls.isEmpty()) {
+            return;
+        }
+        if (m_child->state() == QProcess::NotRunning) {
+            qWarning("grok-bot-companion: failed to deliver protocol URL");
+            m_pendingProtocolUrls.clear();
+            return;
+        }
+        if (electronSingleInstanceReady()
+            && forwardProtocolUrls(m_electronCommand, m_pendingProtocolUrls)) {
+            m_pendingProtocolUrls.clear();
+            return;
+        }
+        if (m_coldReadyClock.hasExpired(kColdProtocolReadyTimeoutMs)) {
+            qWarning("grok-bot-companion: failed to deliver protocol URL");
+            m_pendingProtocolUrls.clear();
+            return;
+        }
+        QTimer::singleShot(kColdProtocolSocketPollMs, this, &CompanionController::deliverColdProtocolUrls);
+    }
+
 private:
-    void startChild(const QStringList &protocolUrls = {})
+    void startChild()
     {
         // Launch through setsid when available so the child owns its process
         // group and Quit can terminate the whole group, not just one pid.
@@ -156,10 +278,10 @@ private:
         m_ownProcessGroup = !setsid.isEmpty();
         if (m_ownProcessGroup) {
             m_child->setProgram(setsid);
-            m_child->setArguments(QStringList{m_electronCommand} << protocolUrls);
+            m_child->setArguments(QStringList{m_electronCommand});
         } else {
             m_child->setProgram(m_electronCommand);
-            m_child->setArguments(protocolUrls);
+            m_child->setArguments({});
         }
         m_child->start();
     }
@@ -197,6 +319,9 @@ private:
     QString m_electronCommand;
     QProcess *m_child;
     bool m_ownProcessGroup;
+    QStringList m_pendingProtocolUrls;
+    QElapsedTimer m_coldReadyClock;
+    bool m_coldDeliveryScheduled;
 };
 
 int main(int argc, char **argv)
@@ -205,7 +330,14 @@ int main(int argc, char **argv)
     QCoreApplication::setApplicationName(QStringLiteral("grok-bot-companion"));
     app.setQuitOnLastWindowClosed(false);
 
-    static QLockFile instanceLock(QDir::temp().filePath(QStringLiteral("grok-bot-companion.lock")));
+    // Flatpak gives each instance a private /tmp, so a temp-dir lock never
+    // sees the running companion. XDG_RUNTIME_DIR is shared and is what the
+    // browser handoff must take so grokbot:// / sand:// reach Electron.
+    QString lockDir = QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation);
+    if (lockDir.isEmpty()) {
+        lockDir = QDir::tempPath();
+    }
+    static QLockFile instanceLock(QDir(lockDir).filePath(QStringLiteral("grok-bot-companion.lock")));
     const QStringList protocolUrls = protocolUrlsFrom(app.arguments());
     if (!instanceLock.tryLock()) {
         // Browser protocol handoff: forward grokbot:// or sand:// to the

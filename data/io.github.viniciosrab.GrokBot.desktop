@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Version=1.5
-Name=Grok Bot (Unofficial)
+Name=Grok Bot
 GenericName=AI Assistant
 Comment=Unofficial Flatpak for Grok Bot. Community-maintained and not endorsed by the upstream vendor.
 Exec=/app/bin/grok-bot-companion %u
@@ -10,3 +10,5 @@ StartupWMClass=grok-bot
 Terminal=false
 MimeType=x-scheme-handler/grokbot;x-scheme-handler/sand;
 Categories=Network;Utility;
+X-KDE-Protocols=grokbot;sand;
+X-Flatpak-RenamedFrom=grok-bot.desktop;
