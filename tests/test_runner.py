@@ -753,6 +753,19 @@ class PayloadContentContractTests(unittest.TestCase):
         self.assertIn("unofficial", text)
         self.assertIn("grok-bot", text)
 
+    def test_desktop_comment_and_metainfo_summary_aligned(self):
+        desktop_text = read_repo_text(DESKTOP_PATH)
+        comment = next(
+            line.split("=", 1)[1]
+            for line in desktop_text.splitlines()
+            if line.startswith("Comment=")
+        )
+        metainfo_text = read_repo_text(METAINFO_PATH)
+        summary = re.search(r"<summary>(.*?)</summary>", metainfo_text).group(1)
+        self.assertEqual(comment, "Grok AI assistant for Linux")
+        self.assertEqual(summary, "Grok AI assistant for Linux")
+        self.assertEqual(comment, summary)
+
 
 class IconSeparationContractTests(unittest.TestCase):
     """Taskbar/window use 10/11-padded artwork; tray keeps 16-on-22.
