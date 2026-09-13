@@ -68,11 +68,17 @@ Each Stable Upstream Release is accepted only when every supported architecture 
 
 ### Manual publish
 
+Same-version packaging fixes publish only through a manual `publish` run bound to the selected `main` commit.
+
+1. Open Actions → publish → Run workflow.
+2. Keep the branch selector on `main`; enter only the required `reason`.
+3. Run the workflow. It publishes the exact `main` commit selected at dispatch.
+
 ```bash
-gh workflow run publish.yml --ref main -f sha=<40-char commit SHA on main> -f reason="why this republish is needed"
+gh workflow run publish.yml --ref main -f reason="why this republish is needed"
 ```
 
-The commit must already have a successful validate run and a successful dual-arch X3 run for that exact SHA; otherwise the run fails closed and publishes nothing.
+There is no SHA input. The run refuses any dispatch not from `refs/heads/main`. The selected `main` snapshot must already have a successful validate run and a successful dual-arch X3 run for that exact commit; otherwise the run fails closed and publishes nothing. A later `main` push racing dispatch does not reject the run.
 
 ### Releases
 
