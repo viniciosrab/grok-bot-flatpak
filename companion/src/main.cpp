@@ -239,15 +239,17 @@ int main(int argc, char **argv)
 
     KStatusNotifierItem tray(&app);
     tray.setTitle(QStringLiteral("Grok Bot (Unofficial)"));
-    // Flatpak exports only icons named after the app-id. Center the rounded
-    // vendor app-id icon on a transparent 22px canvas (KDE SmallMedium tray
+    // Flatpak exports only icons named after the app-id. Center unpadded
+    // upstream artwork on a transparent 22px canvas (KDE SmallMedium tray
     // size) so the visible artwork keeps KDE-style padding instead of
-    // filling the whole square.
+    // filling the whole square. Prefer the preserved unpadded source: the
+    // generated app-id icons are already padded, so scaling them again
+    // would apply the padding twice.
     tray.setIconByName(QStringLiteral("io.github.viniciosrab.GrokBot"));
     const QStringList pixmapCandidates = {
+        QStringLiteral("/app/grok-bot/resources/icon.upstream.png"),
         QStringLiteral("/app/share/icons/hicolor/24x24/apps/io.github.viniciosrab.GrokBot.png"),
         QStringLiteral("/app/share/icons/hicolor/32x32/apps/io.github.viniciosrab.GrokBot.png"),
-        QStringLiteral("/app/share/icons/hicolor/1024x1024/apps/io.github.viniciosrab.GrokBot.png"),
         QStringLiteral("/app/grok-bot/resources/icon.png"),
     };
     QPixmap traySource;

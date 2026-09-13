@@ -87,17 +87,32 @@ modules:
         chmod 755 /app/bin/grok-bot-electron
         cp -a grok-bot-unpacked/usr/share/icons/hicolor/. /app/share/icons/hicolor/
         test -f grok-bot-unpacked/resources/icon.png || { echo "missing rounded vendor icon source" >&2; exit 1; }
-        # Deterministic app-id icons from the rounded vendor source. The SDK
-        # ffmpeg renders each standard hicolor size with fixed lanczos
-        # scaling and bitexact flags so rebuilds produce identical PNGs.
+        # Preserve the original unpadded upstream source before the Electron
+        # resource is replaced with the padded version.
+        install -m644 grok-bot-unpacked/resources/icon.png /app/grok-bot/resources/icon.upstream.png
+        # Deterministic app-id icons from the rounded vendor source. The
+        # upstream artwork is centered at 8/11 of each canvas on a
+        # transparent background so small launcher and taskbar sizes keep
+        # visible padding instead of collapsing into a square. Exported
+        # app-id icons stop at 512 (flatpak-builder export limit); the
+        # padded 1024 Electron window icon is generated separately below
+        # and never placed under hicolor. The SDK ffmpeg renders each size
+        # with fixed lanczos scaling and bitexact flags so rebuilds
+        # produce identical PNGs.
         if [ -x /usr/bin/ffmpeg ]; then
         for size in 16 24 32 48 64 128 256 512; do
           install -d "/app/share/icons/hicolor/${size}x${size}/apps"
-          /usr/bin/ffmpeg -y -v error -i grok-bot-unpacked/resources/icon.png -vf "scale=${size}:${size}:flags=lanczos" -pix_fmt rgba -compression_level 9 -fflags +bitexact -flags:v +bitexact "/app/share/icons/hicolor/${size}x${size}/apps/io.github.viniciosrab.GrokBot.png"
+          inner=$((size*8/11))
+          /usr/bin/ffmpeg -y -v error -i grok-bot-unpacked/resources/icon.png -vf "scale=${inner}:${inner}:flags=lanczos,pad=${size}:${size}:(ow-iw)/2:(oh-ih)/2:color=0x00000000" -pix_fmt rgba -compression_level 9 -fflags +bitexact -flags:v +bitexact "/app/share/icons/hicolor/${size}x${size}/apps/io.github.viniciosrab.GrokBot.png"
         done
+        inner1024=$((1024*8/11))
+        /usr/bin/ffmpeg -y -v error -i /app/grok-bot/resources/icon.upstream.png -vf "scale=${inner1024}:${inner1024}:flags=lanczos,pad=1024:1024:(ow-iw)/2:(oh-ih)/2:color=0x00000000" -pix_fmt rgba -compression_level 9 -fflags +bitexact -flags:v +bitexact /app/grok-bot/resources/icon.png
         else
-          install -d /app/share/icons/hicolor/1024x1024/apps
-          install -m644 grok-bot-unpacked/resources/icon.png /app/share/icons/hicolor/1024x1024/apps/io.github.viniciosrab.GrokBot.png
+          for size in 16 24 32 48 64 128 256 512; do
+            install -d "/app/share/icons/hicolor/${size}x${size}/apps"
+            install -m644 grok-bot-unpacked/resources/icon.png "/app/share/icons/hicolor/${size}x${size}/apps/io.github.viniciosrab.GrokBot.png"
+          done
+          install -m644 /app/grok-bot/resources/icon.upstream.png /app/grok-bot/resources/icon.png
         fi
         install -Dm644 io.github.viniciosrab.GrokBot.desktop /app/share/applications/io.github.viniciosrab.GrokBot.desktop
         install -Dm644 io.github.viniciosrab.GrokBot.metainfo.xml /app/share/metainfo/io.github.viniciosrab.GrokBot.metainfo.xml

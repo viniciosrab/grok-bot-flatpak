@@ -100,6 +100,12 @@ METAINFO_PATH = os.path.join(
 COMPANION_SRC = os.path.join(REPO_ROOT, "companion", "src", "main.cpp")
 COMPANION_CMAKE = os.path.join(REPO_ROOT, "companion", "CMakeLists.txt")
 
+UPSTREAM_PRESERVED_ICON = "/app/grok-bot/resources/icon.upstream.png"
+ELECTRON_RESOURCE_ICON = "/app/grok-bot/resources/icon.png"
+APPID_1024_ICON = (
+    "/app/share/icons/hicolor/1024x1024/apps/io.github.viniciosrab.GrokBot.png"
+)
+
 WATCHER_NAME = "org.kde.StatusNotifierWatcher"
 VENDOR_ICON_512 = "usr/share/icons/hicolor/512x512/apps/grok-bot.png"
 VENDOR_HICOLOR_TREE = "usr/share/icons/hicolor"
@@ -157,14 +163,18 @@ def check_status_notifier_watcher(manifest_text, companion_src):
 
 
 def check_vendor_icon(manifest_text):
-    """Rounded vendor source plus deterministic app-id hicolor generation.
+    """Rounded vendor source plus deterministic padded app-id generation.
 
     The Official Grok Bot Icon source is the vendor-provided
     `resources/icon.png` from the verified Upstream Artifact (transparent
     rounded corners), not replacement artwork. The build preserves the
-    upstream hicolor tree for contracts and deterministically resizes the
-    vendor source into app-id-named icons with SDK ffmpeg. The opaque
-    `grok-bot.png` assets must never be aliased to the app-id.
+    upstream hicolor tree for contracts and deterministically renders the
+    vendor source centered at 8/11 of each transparent canvas into
+    app-id-named icons with SDK ffmpeg. Exported app-id icons stop at 512
+    (flatpak-builder export limit); the padded 1024 Electron window icon is
+    generated separately from the preserved original and never placed under
+    hicolor. The original unpadded source is preserved before replacement.
+    The opaque `grok-bot.png` assets must never be aliased to the app-id.
     """
     if "resources/icon.png" not in manifest_text:
         return False
@@ -179,9 +189,143 @@ def check_vendor_icon(manifest_text):
         return False
     if "16 24 32 48 64 128 256 512" not in manifest_text:
         return False
-    if "1024x1024/apps/io.github.viniciosrab.GrokBot.png" not in manifest_text or "[ -x /usr/bin/ffmpeg ]" not in manifest_text:
+    if "[ -x /usr/bin/ffmpeg ]" not in manifest_text:
+        return False
+    if not check_exported_sizes_capped_at_512(manifest_text):
+        return False
+    if not check_padded_generation(manifest_text):
+        return False
+    if not check_electron_padded_resource(manifest_text):
+        return False
+    if not check_upstream_preserved(manifest_text):
         return False
     return "io.github.viniciosrab.GrokBot.png" in manifest_text
+
+
+def check_exported_sizes_capped_at_512(manifest_text):
+    """Exported app-id hicolor icons stop at 512, never 1024."""
+    if "1024x1024/apps/io.github.viniciosrab.GrokBot.png" in manifest_text:
+        return False
+    return True
+
+
+def check_padded_generation(manifest_text):
+    """Upstream artwork is centered at 8/11 on transparent canvases."""
+    for required in ("8/11", "pad=", "(ow-iw)/2", "(oh-ih)/2", "scale="):
+        if required not in manifest_text:
+            return False
+    if "0x00000000" not in manifest_text:
+        return False
+    return True
+
+
+def check_electron_padded_resource(manifest_text):
+    """The padded 1024 Electron icon is generated directly, not via hicolor."""
+    if UPSTREAM_PRESERVED_ICON not in manifest_text:
+        return False
+    if ELECTRON_RESOURCE_ICON not in manifest_text:
+        return False
+    # The 1024 result must never be exported under hicolor.
+    if APPID_1024_ICON in manifest_text:
+        return False
+    # The Electron resource uses its own padded 1024 canvas.
+    if "pad=1024:1024" not in manifest_text:
+        return False
+    found_direct = False
+    for line in manifest_text.splitlines():
+        if ELECTRON_RESOURCE_ICON in line and "1024" in line:
+            if "ffmpeg" in line or "install" in line or "cp" in line:
+                found_direct = True
+    if not found_direct:
+        return False
+    # The direct 1024 render reads the preserved unpadded original.
+    for line in manifest_text.splitlines():
+        if ELECTRON_RESOURCE_ICON in line and "ffmpeg" in line and "1024" in line:
+            if UPSTREAM_PRESERVED_ICON in line:
+                return True
+    # A graceful fallback copy from the preserved original also counts.
+    for line in manifest_text.splitlines():
+        if UPSTREAM_PRESERVED_ICON in line and ELECTRON_RESOURCE_ICON in line:
+            if "install" in line or "cp" in line:
+                return True
+    return False
+
+
+def check_upstream_preserved(manifest_text):
+    """The original unpadded source is preserved before replacement."""
+    if UPSTREAM_PRESERVED_ICON not in manifest_text:
+        return False
+    if "grok-bot-unpacked/resources/icon.png" not in manifest_text:
+        return False
+    lines = manifest_text.splitlines()
+    preserve_line = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if UPSTREAM_PRESERVED_ICON in line
+            and "grok-bot-unpacked/resources/icon.png" in line
+        ),
+        None,
+    )
+    if preserve_line is None:
+        return False
+    replace_line = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if ELECTRON_RESOURCE_ICON in line and "1024" in line
+        ),
+        None,
+    )
+    if replace_line is None:
+        # Fall back to any Electron resource write after preservation.
+        replace_line = next(
+            (
+                index
+                for index, line in enumerate(lines)
+                if ELECTRON_RESOURCE_ICON in line
+                and ("install" in line or "ffmpeg" in line or "cp" in line)
+                and index > preserve_line
+            ),
+            None,
+        )
+    if replace_line is None:
+        return False
+    return preserve_line < replace_line
+
+
+def check_tray_prefers_unpadded(companion_src):
+    """The tray prefers the preserved unpadded source to avoid padding twice."""
+    if UPSTREAM_PRESERVED_ICON not in companion_src:
+        return False
+    if "hicolor/24x24/apps/io.github.viniciosrab.GrokBot.png" not in companion_src:
+        return False
+    if "apps/grok-bot.png" in companion_src:
+        return False
+    for required in (
+        "QSize(22, 22)",
+        "QSize(16, 16)",
+        "Qt::transparent",
+        "drawPixmap",
+        "setIconByPixmap",
+    ):
+        if required not in companion_src:
+            return False
+    return companion_src.index(UPSTREAM_PRESERVED_ICON) < companion_src.index(
+        "hicolor/24x24/apps/io.github.viniciosrab.GrokBot.png"
+    )
+
+
+def check_no_opaque_alias(manifest_text, companion_src):
+    """No opaque grok-bot.png asset is aliased to the app-id."""
+    if "-name grok-bot.png" in manifest_text:
+        return False
+    if "apps/grok-bot.png" in companion_src:
+        return False
+    for line in manifest_text.splitlines():
+        if "grok-bot.png" in line and "io.github.viniciosrab.GrokBot.png" in line:
+            return False
+    return True
 
 
 def check_electron_exec(manifest_text, desktop_text):
@@ -223,9 +367,10 @@ def check_kde_electron_runtime(manifest_text, companion_src):
     """KDE 6.11 runtime, zypak as a module (never an Electron BaseApp base),
     companion command, and KF6 SNI lifecycle in the companion.
 
-    The tray centers the rounded vendor app-id icon at most 16px on a
+    The tray centers unpadded upstream artwork at most 16px on a
     transparent 22px canvas via QPainter for KDE-style padding, preferring
-    the generated 24px app-id asset. Opaque unpadded pixmaps are rejected.
+    the preserved unpadded source so the already-padded app-id icons are
+    not padded twice. Opaque unpadded pixmaps are rejected.
     """
     for required in ("org.kde.Platform", "org.kde.Sdk", "6.11", "zypak"):
         if required not in manifest_text:
@@ -246,7 +391,6 @@ def check_kde_electron_runtime(manifest_text, companion_src):
         "Qt::transparent",
         "drawPixmap",
         "hicolor/24x24/apps/io.github.viniciosrab.GrokBot.png",
-        "hicolor/1024x1024/apps/io.github.viniciosrab.GrokBot.png",
         "/app/grok-bot/resources/icon.png",
         "grokbot:",
         "sand:",
@@ -254,8 +398,15 @@ def check_kde_electron_runtime(manifest_text, companion_src):
     ):
         if required not in companion_src:
             return False
+    # Exported app-id icons stop at 512, so the tray must not depend on a
+    # 1024 hicolor asset that flatpak-builder refuses to export.
+    if "1024x1024/apps/io.github.viniciosrab.GrokBot.png" in companion_src:
+        return False
+    # The tray must prefer the preserved unpadded source first.
+    if not check_tray_prefers_unpadded(companion_src):
+        return False
     # Opaque vendor assets must never be sent as tray pixmaps; only the
-    # generated rounded app-id icons are used.
+    # preserved upstream artwork and the rounded app-id icons are used.
     if "apps/grok-bot.png" in companion_src:
         return False
     if "killpg" not in companion_src and "setsid" not in companion_src:
@@ -400,6 +551,66 @@ class PayloadContentContractTests(unittest.TestCase):
         text = read_repo_text(METAINFO_PATH).lower()
         self.assertIn("unofficial", text)
         self.assertIn("grok-bot", text)
+
+
+class PaddedLauncherIconContractTests(unittest.TestCase):
+    """Launcher and taskbar icons use centered padded artwork.
+
+    The upstream rounded artwork fills its canvas, so small KDE surfaces
+    collapse its corners into a square. The build centers the artwork at
+    8/11 of each transparent canvas. Exported app-id icons stop at 512
+    because flatpak-builder rejects larger hicolor assets; the padded 1024
+    Electron window icon is generated separately from the preserved
+    unpadded source, while the tray keeps its 16-on-22 treatment from that
+    same preserved source.
+    """
+
+    def test_centered_transparent_padding_for_app_id_sizes(self):
+        manifest_text = read_repo_text(MANIFEST_PATH)
+        self.assertTrue(check_padded_generation(manifest_text))
+        self.assertIn("16 24 32 48 64 128 256 512", manifest_text)
+
+    def test_exported_app_id_sizes_stop_at_512(self):
+        manifest_text = read_repo_text(MANIFEST_PATH)
+        self.assertTrue(check_exported_sizes_capped_at_512(manifest_text))
+        self.assertNotIn(
+            "1024x1024/apps/io.github.viniciosrab.GrokBot.png", manifest_text
+        )
+
+    def test_padded_1024_electron_resource_without_hicolor(self):
+        manifest_text = read_repo_text(MANIFEST_PATH)
+        self.assertTrue(check_electron_padded_resource(manifest_text))
+        self.assertIn("pad=1024:1024", manifest_text)
+
+    def test_original_upstream_source_preserved(self):
+        manifest_text = read_repo_text(MANIFEST_PATH)
+        self.assertTrue(check_upstream_preserved(manifest_text))
+
+    def test_tray_prefers_preserved_unpadded_source(self):
+        companion_src = read_repo_text(COMPANION_SRC)
+        self.assertTrue(check_tray_prefers_unpadded(companion_src))
+        self.assertNotIn(
+            "1024x1024/apps/io.github.viniciosrab.GrokBot.png", companion_src
+        )
+        # The existing 16-on-22 QPainter treatment is unchanged.
+        for required in (
+            "QSize(22, 22)",
+            "QSize(16, 16)",
+            "Qt::transparent",
+            "drawPixmap",
+        ):
+            self.assertIn(required, companion_src)
+
+    def test_no_opaque_alias_returns(self):
+        manifest_text = read_repo_text(MANIFEST_PATH)
+        companion_src = read_repo_text(COMPANION_SRC)
+        self.assertTrue(check_no_opaque_alias(manifest_text, companion_src))
+
+    def test_no_ffmpeg_fallback_stays_graceful(self):
+        manifest_text = read_repo_text(MANIFEST_PATH)
+        self.assertIn("[ -x /usr/bin/ffmpeg ]", manifest_text)
+        self.assertIn("else", manifest_text)
+        self.assertIn("fi", manifest_text)
 
 
 class ZypakSubmoduleContractTests(unittest.TestCase):
