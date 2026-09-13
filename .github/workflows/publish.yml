@@ -12,13 +12,18 @@
 # and publish nothing. Version comparison uses tag provenance only.
 #
 # Explicit packaging republishes at the SAME upstream version run only
-# through manual workflow_dispatch with a required exact commit SHA and
-# a required reason. The manual path keeps full safety: the SHA must be
-# a 40-char commit on main history, must already have a successful
-# validate run and a successful dual-arch X3 run for that exact SHA,
-# and every job checks out that exact SHA — never implicit
-# default-branch bytes and never a stale successful run. A failed
-# verification fails closed and publishes nothing. Pull request and
+# through manual workflow_dispatch with a single required `reason`
+# input. There is no SHA input: the run binds automatically to the
+# exact main commit selected at dispatch (`github.sha`) and refuses
+# any dispatch whose ref is not `refs/heads/main`. The captured
+# dispatch SHA is the user's selected main snapshot: it must be an
+# exact 40-char commit that exists and is an ancestor of
+# `origin/main`, but it need not still be the tip (a later main push
+# may race dispatch and must not falsely reject). It must already
+# have a successful validate run and a successful dual-arch X3 run
+# for that exact SHA, and every job checks out that exact SHA —
+# never implicit default-branch bytes and never a stale successful
+# run. A failed verification fails closed and publishes nothing. Pull request and
 # manual diagnostic (x3 workflow_dispatch) runs can never publish
 # without this explicit dispatch.
 #
@@ -49,11 +54,8 @@ on:
     branches: [main]
   workflow_dispatch:
     inputs:
-      sha:
-        description: 'Exact 40-char commit SHA on main to publish (must already have successful validate and dual-arch X3 for that SHA)'
-        required: true
       reason:
-        description: 'Why this manual publish is needed (recorded in the run log)'
+        description: 'Why this manual publish is needed (recorded in the run log). Keep the branch selector on main; the run publishes the selected main commit automatically.'
         required: true
 
 permissions:
@@ -88,11 +90,11 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Check out the requested commit (manual path)
+      - name: Check out the dispatched main snapshot (manual path)
         if: ${{ github.event_name == 'workflow_dispatch' }}
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -105,7 +107,8 @@ jobs:
           TRIGGER_EVENT: ${{ github.event.workflow_run.event }}
           TRIGGER_BRANCH: ${{ github.event.workflow_run.head_branch }}
           TRIGGER_SHA: ${{ github.event.workflow_run.head_sha }}
-          INPUT_SHA: ${{ inputs.sha }}
+          DISPATCH_SHA: ${{ github.sha }}
+          DISPATCH_REF: ${{ github.ref }}
           INPUT_REASON: ${{ inputs.reason }}
         run: |
           set -euo pipefail
@@ -113,15 +116,20 @@ jobs:
           SHA=""
           if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
             MODE="manual"
-            SHA="${INPUT_SHA}"
+            # BEGIN manual dispatch binding (executed verbatim by tests in a fake harness; keep self-contained: needs DISPATCH_SHA, DISPATCH_REF, INPUT_REASON; sets SHA).
+            SHA="${DISPATCH_SHA}"
+            if [ "${DISPATCH_REF}" != "refs/heads/main" ]; then
+              echo "manual publish must be dispatched from refs/heads/main (got ${DISPATCH_REF}); refusing to publish" >&2
+              exit 1
+            fi
             case "${SHA}" in
               *[!0-9a-f]*|"")
-                echo "manual publish requires an exact 40-char hex commit SHA" >&2
+                echo "manual publish requires the dispatched main snapshot SHA (exact 40-char hex)" >&2
                 exit 1
                 ;;
             esac
             if [ "${#SHA}" -ne 40 ]; then
-              echo "manual publish requires an exact 40-char hex commit SHA" >&2
+              echo "manual publish requires the dispatched main snapshot SHA (exact 40-char hex)" >&2
               exit 1
             fi
             if [ -z "${INPUT_REASON}" ]; then
@@ -129,6 +137,7 @@ jobs:
               exit 1
             fi
             echo "manual publish requested for ${SHA}: ${INPUT_REASON}"
+            # END manual dispatch binding.
           elif [ "${EVENT_NAME}" = "workflow_run" ]; then
             if [ "${TRIGGER_CONCLUSION}" != "success" ] || [ "${TRIGGER_EVENT}" != "workflow_run" ] || [ "${TRIGGER_BRANCH}" != "main" ]; then
               echo "not a successful chain X3 run on main; skipping automatic publication (no-op success)"
@@ -168,16 +177,20 @@ jobs:
           if [ "${MODE}" = "manual" ]; then
             # BEGIN manual proof gate (executed verbatim by tests with a fake gh harness; keep self-contained: needs MODE, SHA, VERSION, GITHUB_REPOSITORY, gh on PATH).
             # Bind the manual run to main history and to proven results
-            # for that EXACT SHA: no stale or foreign commit may publish.
-            git cat-file -e "${SHA}^{commit}" || { echo "requested SHA does not exist; failing closed" >&2; exit 1; }
+            # for that EXACT dispatched snapshot: the SHA is the main
+            # commit selected at dispatch (github.sha), never an
+            # operator-supplied value. It must be an ancestor of
+            # origin/main, but it need not still be the tip: a later
+            # main push may race dispatch and must not falsely reject.
+            git cat-file -e "${SHA}^{commit}" || { echo "dispatched SHA does not exist; failing closed" >&2; exit 1; }
             git fetch origin main || true
             if ! git merge-base --is-ancestor "${SHA}" origin/main; then
-              echo "requested SHA is not on main history; refusing to publish" >&2
+              echo "dispatched SHA is not on main history; refusing to publish" >&2
               exit 1
             fi
             PINNED_AT_SHA="$(git show "${SHA}:data/pins.yml" | grep '^version:' | awk '{print $2}')"
             if [ "${PINNED_AT_SHA}" != "${VERSION}" ]; then
-              echo "version mismatch for requested SHA; failing closed" >&2
+              echo "version mismatch for dispatched SHA; failing closed" >&2
               exit 1
             fi
             REPO="${GITHUB_REPOSITORY}"

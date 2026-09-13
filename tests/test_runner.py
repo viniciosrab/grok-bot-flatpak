@@ -1297,10 +1297,16 @@ class AtomicContentContractTests(unittest.TestCase):
         self.assertIn("not a successful chain X3 run on main", text)
         self.assertIn("head_branch", text)
         self.assertIn("head_sha", text)
-        # The explicit manual path needs an exact SHA plus a reason, never bare.
+        # The explicit manual path asks only for a reason and binds to
+        # the dispatched main snapshot; no SHA input is permitted.
         self.assertIn("workflow_dispatch:", text)
-        self.assertIn("inputs.sha", text)
+        self.assertNotIn("inputs.sha", text)
+        self.assertNotIn("INPUT_SHA", text)
         self.assertIn("inputs.reason", text)
+        self.assertIn("DISPATCH_SHA: ${{ github.sha }}", text)
+        self.assertIn("DISPATCH_REF: ${{ github.ref }}", text)
+        self.assertIn("refs/heads/main", text)
+        self.assertIn("ref: ${{ github.sha }}", text)
         self.assertIn("required: true", text)
         for secret in REQUIRED_PUBLISH_SECRETS:
             self.assertIn(f"secrets.{secret}", text)
@@ -1512,11 +1518,16 @@ class ReleaseBehaviorContractTests(unittest.TestCase):
         self.assertIn("git show", text)
         self.assertIn("data/pins.yml", text)
 
-    def test_manual_dispatch_requires_exact_sha_and_reason(self):
+    def test_manual_dispatch_binds_snapshot_and_requires_reason(self):
         text = read_repo_text(PUBLISH_WORKFLOW_PATH)
-        self.assertIn("INPUT_SHA: ${{ inputs.sha }}", text)
+        self.assertNotIn("inputs.sha", text)
+        self.assertNotIn("INPUT_SHA", text)
+        self.assertIn("DISPATCH_SHA: ${{ github.sha }}", text)
+        self.assertIn("DISPATCH_REF: ${{ github.ref }}", text)
         self.assertIn("INPUT_REASON: ${{ inputs.reason }}", text)
-        self.assertIn("40-char hex commit SHA", text)
+        self.assertIn("refs/heads/main", text)
+        self.assertIn("dispatched from refs/heads/main", text)
+        self.assertIn("40-char hex", text)
         self.assertIn("manual publish requires a reason", text)
         self.assertIn("merge-base --is-ancestor", text)
         self.assertIn("origin/main", text)
@@ -1578,15 +1589,6 @@ class ReleaseBehaviorContractTests(unittest.TestCase):
         # Rollback retrieves the exact prior backup by explicit tag
         # with GH_TOKEN, covering legacy public and new draft backups.
         self.assertIn('gh release download "${REL_TAG}"', text)
-
-    def test_diagnostic_and_pr_runs_cannot_publish_without_intent(self):
-        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
-        self.assertNotIn("pull_request", text)
-        self.assertIn("not a successful chain X3 run on main", text)
-        # A manual diagnostic X3 run (workflow_dispatch event) still
-        # reaches the no-op branch of the automatic path.
-        self.assertIn("TRIGGER_EVENT", text)
-
 
     def test_diagnostic_and_pr_runs_cannot_publish_without_intent(self):
         text = read_repo_text(PUBLISH_WORKFLOW_PATH)
@@ -1860,6 +1862,58 @@ class ShellHarnessContractTests(unittest.TestCase):
             env.update(extra_env)
         return run_harness(script, env=env)
 
+    def run_dispatch_binding(self, dispatch_sha, dispatch_ref, reason):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        block = extract_verbatim_block(
+            text,
+            "# BEGIN manual dispatch binding",
+            "# END manual dispatch binding.",
+        )
+        script = (
+            "set -euo pipefail\n"
+            + block
+            + 'echo "DISPATCH_BINDING=PASS SHA=${SHA}"\n'
+        )
+        env = dict(os.environ)
+        env["DISPATCH_SHA"] = dispatch_sha
+        env["DISPATCH_REF"] = dispatch_ref
+        env["INPUT_REASON"] = reason
+        return run_harness(script, env=env)
+
+    def test_real_dispatch_binding_passes_on_main(self):
+        repo, sha = self.make_manual_repo("0.48.0")
+        _ = repo
+        proc = self.run_dispatch_binding(
+            sha, "refs/heads/main", "packaging fix republish"
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("DISPATCH_BINDING=PASS", proc.stdout)
+        self.assertIn(f"SHA={sha}", proc.stdout)
+
+    def test_real_dispatch_binding_rejects_non_main_ref(self):
+        repo, sha = self.make_manual_repo("0.48.0")
+        _ = repo
+        proc = self.run_dispatch_binding(
+            sha, "refs/heads/fix/release-publication-policy",
+            "packaging fix republish",
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("must be dispatched from refs/heads/main", proc.stderr)
+
+    def test_real_dispatch_binding_rejects_malformed_sha(self):
+        proc = self.run_dispatch_binding(
+            "not-a-sha", "refs/heads/main", "packaging fix republish"
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("exact 40-char hex", proc.stderr)
+
+    def test_real_dispatch_binding_rejects_missing_reason(self):
+        repo, sha = self.make_manual_repo("0.48.0")
+        _ = repo
+        proc = self.run_dispatch_binding(sha, "refs/heads/main", "")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("requires a reason", proc.stderr)
+
     def test_real_manual_gate_passes_for_proven_sha(self):
         repo, sha = self.make_manual_repo("0.48.0")
         proc = self.run_manual_gate(repo, sha, "0.48.0")
@@ -1880,7 +1934,7 @@ class ShellHarnessContractTests(unittest.TestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("no successful dual-arch X3 run", proc.stderr)
 
-    def test_real_manual_gate_rejects_stale_sha(self):
+    def test_real_manual_gate_rejects_foreign_sha(self):
         repo, first = self.make_manual_repo("0.48.0")
         # origin/main stays at the first commit; a newer commit that
         # is not its ancestor must not publish.
@@ -1897,6 +1951,30 @@ class ShellHarnessContractTests(unittest.TestCase):
         proc = self.run_manual_gate(repo, later, "0.48.0")
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("not on main history", proc.stderr)
+
+    def test_real_manual_gate_accepts_ancestor_behind_tip(self):
+        repo, first = self.make_manual_repo("0.48.0")
+        # A later main push races dispatch: origin/main moves past the
+        # dispatched snapshot, which stays an ancestor but is no
+        # longer the tip. That must still publish, not falsely reject.
+        subprocess.run(
+            ["git", "-C", repo, "commit", "-q", "--allow-empty",
+             "-m", "later push"],
+            check=True,
+        )
+        later = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        subprocess.run(
+            ["git", "-C", repo, "update-ref",
+             "refs/remotes/origin/main", later],
+            check=True,
+        )
+        self.assertNotEqual(first, later)
+        proc = self.run_manual_gate(repo, first, "0.48.0")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("MANUAL_GATE=PASS", proc.stdout)
 
     def test_decide_job_has_effective_actions_read(self):
         text = read_repo_text(PUBLISH_WORKFLOW_PATH)
