@@ -49,17 +49,47 @@ bool watcherAvailable()
     return bus != nullptr && bus->isServiceRegistered(QString::fromLatin1(kWatcherService));
 }
 
+bool isProtocolUrl(const QString &arg)
+{
+    return arg.startsWith(QLatin1String("grokbot:"))
+        || arg.startsWith(QLatin1String("sand:"));
+}
+
+QStringList protocolUrlsFrom(const QStringList &args)
+{
+    QStringList urls;
+    for (int i = 1; i < args.size(); ++i) {
+        if (isProtocolUrl(args.at(i))) {
+            urls.append(args.at(i));
+        }
+    }
+    return urls;
+}
+
 QString resolveElectronCommand(const QApplication &app)
 {
     const QStringList args = app.arguments();
-    if (args.size() > 1 && !args.at(1).isEmpty()) {
-        return args.at(1);
+    if (args.size() > 1 && !args.at(1).isEmpty() && !isProtocolUrl(args.at(1))) {
+        const QFileInfo info(args.at(1));
+        if (info.exists() && info.isExecutable()) {
+            return args.at(1);
+        }
     }
     const QString fromEnv = QString::fromLocal8Bit(qgetenv(kElectronEnvVar)).trimmed();
     if (!fromEnv.isEmpty()) {
         return fromEnv;
     }
     return QString::fromLatin1(kDefaultElectronPath);
+}
+
+void forwardProtocolUrls(const QString &electronCommand, const QStringList &urls)
+{
+    if (urls.isEmpty()) {
+        return;
+    }
+    if (!QProcess::startDetached(electronCommand, urls)) {
+        qWarning("grok-bot-companion: failed to forward protocol URL to %s", qPrintable(electronCommand));
+    }
 }
 
 } // namespace
@@ -85,9 +115,9 @@ public:
         connect(m_tray, &KStatusNotifierItem::quitRequested, this, &CompanionController::quitRequested);
     }
 
-    void start()
+    void start(const QStringList &protocolUrls = {})
     {
-        startChild();
+        startChild(protocolUrls);
     }
 
 private slots:
@@ -117,7 +147,7 @@ private slots:
     }
 
 private:
-    void startChild()
+    void startChild(const QStringList &protocolUrls = {})
     {
         // Launch through setsid when available so the child owns its process
         // group and Quit can terminate the whole group, not just one pid.
@@ -125,10 +155,10 @@ private:
         m_ownProcessGroup = !setsid.isEmpty();
         if (m_ownProcessGroup) {
             m_child->setProgram(setsid);
-            m_child->setArguments({m_electronCommand});
+            m_child->setArguments(QStringList{m_electronCommand} << protocolUrls);
         } else {
             m_child->setProgram(m_electronCommand);
-            m_child->setArguments({});
+            m_child->setArguments(protocolUrls);
         }
         m_child->start();
     }
@@ -175,7 +205,11 @@ int main(int argc, char **argv)
     app.setQuitOnLastWindowClosed(false);
 
     static QLockFile instanceLock(QDir::temp().filePath(QStringLiteral("grok-bot-companion.lock")));
+    const QStringList protocolUrls = protocolUrlsFrom(app.arguments());
     if (!instanceLock.tryLock()) {
+        // Browser protocol handoff: forward grokbot:// or sand:// to the
+        // already-running Electron instead of dropping the URL.
+        forwardProtocolUrls(resolveElectronCommand(app), protocolUrls);
         qWarning("grok-bot-companion: another instance is already running");
         return 0;
     }
@@ -234,7 +268,7 @@ int main(int argc, char **argv)
     tray.setStandardActionsEnabled(true);
 
     CompanionController controller(&tray, electronCommand, &app);
-    controller.start();
+    controller.start(protocolUrls);
     return app.exec();
 }
 

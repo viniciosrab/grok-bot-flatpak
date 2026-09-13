@@ -178,7 +178,11 @@ def check_electron_exec(manifest_text, desktop_text):
         for line in desktop_text.splitlines()
         if line.strip().startswith("Exec=")
     ]
-    if len(exec_lines) != 1 or "companion" not in exec_lines[0]:
+    if len(exec_lines) != 1 or "companion" not in exec_lines[0] or "%u" not in exec_lines[0]:
+        return False
+    if "x-scheme-handler/grokbot" not in desktop_text:
+        return False
+    if "x-scheme-handler/sand" not in desktop_text:
         return False
     icon_lines = [
         line.strip()
@@ -217,6 +221,9 @@ def check_kde_electron_runtime(manifest_text, companion_src):
         "setIconByPixmap",
         "QSize(22, 22)",
         "hicolor/24x24/apps/io.github.viniciosrab.GrokBot.png",
+        "grokbot:",
+        "sand:",
+        "forwardProtocolUrls",
     ):
         if required not in companion_src:
             return False
