@@ -1,9 +1,9 @@
 # Unofficial Grok Bot Flatpak
 
-Install Grok Bot on Linux through the independently maintained Flatpak Repository for `io.github.viniciosrab.GrokBot`.
+Grok Bot packaged as a Flatpak (`io.github.viniciosrab.GrokBot`) for Linux on `x86_64` and `aarch64`. Install and update it from this repository's Pages Flatpak repository.
 
 > [!IMPORTANT]
-> This is an **Unofficial Flatpak**. It is not endorsed, published, or supported by the Grok Bot vendor.
+> This is an **unofficial, community-maintained package**. It is not endorsed, published, or supported by the Grok Bot vendor.
 
 ## Install
 
@@ -20,13 +20,13 @@ flatpak install --user grok-bot \
   io.github.viniciosrab.GrokBot//master
 ```
 
-The Flatpak Repository currently publishes `x86_64` and `aarch64` builds.
+Flathub is only used for the KDE runtime below. The application itself is not available on Flathub.
 
 ### Signature limitation
 
-The repository is signed during publication, but its public signing key and a `.flatpakrepo` configuration file are not published yet. The `--no-gpg-verify` option is therefore currently required when adding the remote. HTTPS still protects the repository in transit, but it does not replace client-side signature verification.
+The repository is signed during publication, but its public signing key is not published yet. The `--no-gpg-verify` option is therefore currently required when adding the remote. HTTPS still protects the download in transit, but it does not replace client-side signature verification.
 
-## Run
+## Launch
 
 Launch Grok Bot from your desktop application menu or run:
 
@@ -35,6 +35,8 @@ flatpak run io.github.viniciosrab.GrokBot
 ```
 
 ## Update
+
+The bundled updater is disabled. Update only through Flatpak:
 
 ```bash
 flatpak update --user io.github.viniciosrab.GrokBot
@@ -54,46 +56,30 @@ Remove the repository as well if you no longer need it:
 flatpak remote-delete --user grok-bot
 ```
 
-## Release model
+## Compatibility
 
-Ordinary pushes to `main` validate but never automatically publish — including docs and packaging-only changes.
+| Topic | Expectation |
+|-------|-------------|
+| Architectures | `x86_64` and `aarch64` |
+| Sessions | Wayland and X11 |
+| Tray integration | Follows the KDE StatusNotifier standard; fullest experience on KDE Plasma |
+| Runtime | KDE Platform 6.11, fetched from Flathub |
+| Link handling | `grokbot:` and `sand:` links open in the application |
 
-| Change | What happens |
-|--------|--------------|
-| Ordinary push to `main` | Validate runs (plus automatic X3 proof). No release. |
-| New upstream version via the six-hour pin workflow | Automatically traverses validate, dual-arch X3 proof, and publish. Same-version repins do not auto-publish. |
-| Packaging fix at the same upstream version | Publish manually (see below). Updates the existing `Grok Bot v${VERSION}` release and the Flatpak repository; no new public release entry. |
+## Limitations and trust
 
-Each Stable Upstream Release is accepted only when every supported architecture has a verified Upstream Artifact and Source Checksum. Reproducible integration changes produce the Packaged Payload, which is validated on both architectures before publication.
+- Unofficial package; for vendor support, use the vendor's own distribution.
+- Grok Bot itself remains proprietary upstream software.
+- See the signature limitation above before adding the repository.
 
-### Manual publish
+## Releases and downloads
 
-Same-version packaging fixes publish only through a manual `publish` run bound to the selected `main` commit.
+Public releases are titled `Grok Bot vVERSION`, one per upstream version. Install and update from the [Flatpak repository](https://viniciosrab.github.io/grok-bot-flatpak/). The `site.tar.gz` files attached to [GitHub Releases](https://github.com/viniciosrab/grok-bot-flatpak/releases) are publication audit artifacts, not application installers.
 
-1. Open Actions → publish → Run workflow.
-2. Keep the branch selector on `main`; enter only the required `reason`.
-3. Run the workflow. It publishes the exact `main` commit selected at dispatch.
+## Report issues
 
-```bash
-gh workflow run publish.yml --ref main -f reason="why this republish is needed"
-```
+Report packaging problems at [GitHub Issues](https://github.com/viniciosrab/grok-bot-flatpak/issues).
 
-There is no SHA input. The run refuses any dispatch not from `refs/heads/main`. The selected `main` snapshot must already have a successful validate run and a successful dual-arch X3 run for that exact commit; otherwise the run fails closed and publishes nothing. A later `main` push racing dispatch does not reject the run.
+## Contributing
 
-### Releases
-
-The public release is titled exactly `Grok Bot v${VERSION}` (tag `v${VERSION}`) — the only published entry per version. New internal `flatpak/${VERSION}-rN` backups are saved as hidden draft releases (never in the public list, never Latest); `flatpak/deployed-${VERSION}-rN` markers stay for rollback. Legacy public backup releases are left untouched.
-
-Users install and receive updates from the [Flatpak Repository](https://viniciosrab.github.io/grok-bot-flatpak/). The `site.tar.gz` files attached to [GitHub Releases](https://github.com/viniciosrab/grok-bot-flatpak/releases) are publication audit and rollback artifacts, not application installers.
-
-The Packaged Payload uses the Official Grok Bot Icon without redesigning or recreating it.
-
-## Project verification
-
-The repository contains automated checks for source pins, payload integration, both supported architectures, and the KDE tray runtime boundary. Run the local workspace gate with:
-
-```bash
-python3 tools/test.py
-```
-
-Architecture decisions and provenance rules are documented in [`CONTEXT.md`](CONTEXT.md) and [`docs/adr/`](docs/adr/).
+Want to help with packaging or automation? See [CONTRIBUTING.md](CONTRIBUTING.md).
