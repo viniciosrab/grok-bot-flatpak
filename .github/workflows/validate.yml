@@ -74,7 +74,7 @@ jobs:
           set -euo pipefail
           test -f build-dir/files/share/icons/hicolor/512x512/apps/grok-bot.png || { echo "missing Official Grok Bot Icon" >&2; exit 1; }
           test -d build-dir/files/share/icons/hicolor || { echo "missing vendor hicolor tree" >&2; exit 1; }
-          grep -q '^Exec=/app/bin/grok-bot-companion$' build-dir/files/share/applications/io.github.viniciosrab.GrokBot.desktop || { echo "desktop Exec must launch the companion" >&2; exit 1; }
+          grep -qE '^Exec=/app/bin/grok-bot-companion( %u)?
           grep -q 'org.kde.StatusNotifierWatcher' io.github.viniciosrab.GrokBot.yml || { echo "missing StatusNotifierWatcher talk-name" >&2; exit 1; }
           test -x build-dir/files/bin/grok-bot-companion || { echo "missing companion binary" >&2; exit 1; }
 
@@ -134,6 +134,107 @@ jobs:
           test -f build-dir/files/share/icons/hicolor/512x512/apps/grok-bot.png || { echo "missing Official Grok Bot Icon" >&2; exit 1; }
           test -d build-dir/files/share/icons/hicolor || { echo "missing vendor hicolor tree" >&2; exit 1; }
           grep -q '^Exec=/app/bin/grok-bot-companion$' build-dir/files/share/applications/io.github.viniciosrab.GrokBot.desktop || { echo "desktop Exec must launch the companion" >&2; exit 1; }
+          grep -q 'org.kde.StatusNotifierWatcher' io.github.viniciosrab.GrokBot.yml || { echo "missing StatusNotifierWatcher talk-name" >&2; exit 1; }
+          test -x build-dir/files/bin/grok-bot-companion || { echo "missing companion binary" >&2; exit 1; }
+
+      - name: Prove the watcher gate rejects a watcherless session (NOT X3 launch proof)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -euo pipefail
+          # Headless Qt needs a display-independent platform so QApplication
+          # constructs and the companion reaches the real missing-watcher
+          # path instead of dying in the xcb plugin with no display.
+          set +e
+          timeout 60 dbus-run-session -- flatpak-builder --run build-dir io.github.viniciosrab.GrokBot.yml env QT_QPA_PLATFORM=offscreen /app/bin/grok-bot-companion >launch.log 2>&1
+          RC=$?
+          set -e
+          cat launch.log
+          grep -q 'StatusNotifierWatcher' launch.log || { echo "watcher gate went silent" >&2; exit 1; }
+          test "${RC}" -eq 1 || { echo "headless launch must fail closed at the watcher gate" >&2; exit 1; }
+          echo "NEGATIVE TEST ONLY: companion rejects a watcherless session with exit 1."
+          echo "This is NOT X3 launch proof. Positive X3 proof runs only in the automatic hosted x3 workflow."
+ build-dir/files/share/applications/io.github.viniciosrab.GrokBot.desktop || { echo "desktop Exec must launch the companion" >&2; exit 1; }
+          grep -q 'org.kde.StatusNotifierWatcher' io.github.viniciosrab.GrokBot.yml || { echo "missing StatusNotifierWatcher talk-name" >&2; exit 1; }
+          test -x build-dir/files/bin/grok-bot-companion || { echo "missing companion binary" >&2; exit 1; }
+
+      - name: Prove the watcher gate rejects a watcherless session (NOT X3 launch proof)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -euo pipefail
+          # Headless Qt needs a display-independent platform so QApplication
+          # constructs and the companion reaches the real missing-watcher
+          # path instead of dying in the xcb plugin with no display.
+          set +e
+          timeout 60 dbus-run-session -- flatpak-builder --run build-dir io.github.viniciosrab.GrokBot.yml env QT_QPA_PLATFORM=offscreen /app/bin/grok-bot-companion >launch.log 2>&1
+          RC=$?
+          set -e
+          cat launch.log
+          grep -q 'StatusNotifierWatcher' launch.log || { echo "watcher gate went silent" >&2; exit 1; }
+          test "${RC}" -eq 1 || { echo "headless launch must fail closed at the watcher gate" >&2; exit 1; }
+          echo "NEGATIVE TEST ONLY: companion rejects a watcherless session with exit 1."
+          echo "This is NOT X3 launch proof. Positive X3 proof runs only in the automatic hosted x3 workflow."
+
+  build-aarch64:
+    runs-on: ubuntu-24.04-arm
+    strategy:
+      fail-fast: false
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Verify the aarch64 Source Checksum
+        run: |
+          set -euo pipefail
+          URL="$(grep -A3 'aarch64:' data/pins.yml | grep 'url:' | awk '{print $2}')"
+          DIGEST="$(grep -A3 'aarch64:' data/pins.yml | grep 'sha256:' | awk '{print $2}')"
+          test -n "${URL}" || { echo "missing aarch64 pin" >&2; exit 1; }
+          test -n "${DIGEST}" || { echo "missing aarch64 digest" >&2; exit 1; }
+          curl -sSL --fail -o upstream.AppImage "${URL}"
+          printf '%s  %s\n' "${DIGEST}" upstream.AppImage | sha256sum -c -
+          test "$(stat -c%s upstream.AppImage)" -gt 0 || { echo "empty artifact" >&2; exit 1; }
+
+      - name: Install the Flatpak toolchain and KDE 6.11 runtime
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install -y flathub org.kde.Platform//6.11 org.kde.Sdk//6.11
+
+      - name: Build the aarch64 payload
+        run: |
+          set -euo pipefail
+          flatpak-builder --force-clean --repo=repo build-dir io.github.viniciosrab.GrokBot.yml
+
+      - name: Prove the vendor icon and companion Exec
+        run: |
+          set -euo pipefail
+          test -f build-dir/files/share/icons/hicolor/512x512/apps/grok-bot.png || { echo "missing Official Grok Bot Icon" >&2; exit 1; }
+          test -d build-dir/files/share/icons/hicolor || { echo "missing vendor hicolor tree" >&2; exit 1; }
+          grep -qE '^Exec=/app/bin/grok-bot-companion( %u)?
+          grep -q 'org.kde.StatusNotifierWatcher' io.github.viniciosrab.GrokBot.yml || { echo "missing StatusNotifierWatcher talk-name" >&2; exit 1; }
+          test -x build-dir/files/bin/grok-bot-companion || { echo "missing companion binary" >&2; exit 1; }
+
+      - name: Prove the watcher gate rejects a watcherless session (NOT X3 launch proof)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          set -euo pipefail
+          # Headless Qt needs a display-independent platform so QApplication
+          # constructs and the companion reaches the real missing-watcher
+          # path instead of dying in the xcb plugin with no display.
+          set +e
+          timeout 60 dbus-run-session -- flatpak-builder --run build-dir io.github.viniciosrab.GrokBot.yml env QT_QPA_PLATFORM=offscreen /app/bin/grok-bot-companion >launch.log 2>&1
+          RC=$?
+          set -e
+          cat launch.log
+          grep -q 'StatusNotifierWatcher' launch.log || { echo "watcher gate went silent" >&2; exit 1; }
+          test "${RC}" -eq 1 || { echo "headless launch must fail closed at the watcher gate" >&2; exit 1; }
+          echo "NEGATIVE TEST ONLY: companion rejects a watcherless session with exit 1."
+          echo "This is NOT X3 launch proof. Positive X3 proof runs only in the automatic hosted x3 workflow."
+ build-dir/files/share/applications/io.github.viniciosrab.GrokBot.desktop || { echo "desktop Exec must launch the companion" >&2; exit 1; }
           grep -q 'org.kde.StatusNotifierWatcher' io.github.viniciosrab.GrokBot.yml || { echo "missing StatusNotifierWatcher talk-name" >&2; exit 1; }
           test -x build-dir/files/bin/grok-bot-companion || { echo "missing companion binary" >&2; exit 1; }
 
