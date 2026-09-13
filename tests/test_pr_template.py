@@ -13,7 +13,14 @@ import unittest
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TEMPLATE_PATH = os.path.join(REPO_ROOT, ".github", "PULL_REQUEST_TEMPLATE.md")
 
-SUPPORTED_TYPE_LABELS = {"type:bug", "type:chore"}
+SUPPORTED_TYPE_LABELS = {
+    "type:bug",
+    "type:feature",
+    "type:docs",
+    "type:refactor",
+    "type:chore",
+    "type:breaking-change",
+}
 
 
 def read_text(path):
@@ -46,6 +53,24 @@ class PullRequestTemplateTests(unittest.TestCase):
     def test_rollback_section_present(self):
         self.assertRegex(self.text, r"(?m)^## Rollback\s*$")
 
+    def test_required_sections_present(self):
+        for heading in (
+            "Linked issue",
+            "Type",
+            "Summary",
+            "Changes",
+            "Test plan",
+            "Rollback",
+            "Checklist",
+        ):
+            with self.subTest(section=heading):
+                self.assertRegex(self.text, r"(?m)^## %s\s*$" % heading)
+
+    def test_contributor_conventions_pinned(self):
+        self.assertIn("Conventional Commits", self.text)
+        self.assertIn("Co-Authored-By", self.text)
+        self.assertIn("Docs updated if behavior changed", self.text)
+
     def test_size_exception_rule_present(self):
         self.assertIn("size:exception", self.text)
         self.assertIn("400", self.text)
@@ -54,6 +79,16 @@ class PullRequestTemplateTests(unittest.TestCase):
         lowered = self.text.lower()
         self.assertNotIn("shellcheck", lowered)
         self.assertNotIn("skills test", lowered)
+
+
+class ContributingPrProcessTests(unittest.TestCase):
+    def test_contributing_lists_all_six_type_mappings(self):
+        path = os.path.join(REPO_ROOT, "CONTRIBUTING.md")
+        self.assertTrue(os.path.isfile(path), "CONTRIBUTING.md must exist")
+        text = read_text(path)
+        self.assertIn("PULL_REQUEST_TEMPLATE.md", text)
+        for label in SUPPORTED_TYPE_LABELS:
+            self.assertIn(label, text, label)
 
 
 if __name__ == "__main__":

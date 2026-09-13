@@ -16,7 +16,18 @@ python3 tools/test.py
 
 ## Pull requests
 
-Open a pull request against `main` from a `type/description` branch (for example `fix/tray-regression`). Fill in [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md): link an approved issue (`Closes #N`, issue carries `status:approved`), pick exactly one type label (`type:bug` or `type:chore`), record the `python3 tools/test.py` result, and name the rollback boundary. Pull requests run the `validate` workflow and must pass before merge. Keep the change at most 400 changed lines, or get maintainer approval for `size:exception`.
+Open a pull request against `main` from a `type/description` branch (for example `fix/tray-regression`). Fill in [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md): link an approved issue (`Closes #N`, issue carries `status:approved`) and pick exactly one type label:
+
+| PR type | Label |
+|---------|-------|
+| Bug fix | `type:bug` |
+| New feature | `type:feature` |
+| Documentation only | `type:docs` |
+| Code refactoring | `type:refactor` |
+| Maintenance/tooling | `type:chore` |
+| Breaking change | `type:breaking-change` |
+
+Record the `python3 tools/test.py` result plus focused or runtime evidence, and name the rollback boundary. Pull requests run the `validate` workflow and must pass before merge. Use Conventional Commits with no `Co-Authored-By` trailers. Keep the change at most 400 changed lines, or get maintainer approval for `size:exception`.
 
 ## Prerequisites
 
