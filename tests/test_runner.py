@@ -7,6 +7,10 @@ rejection checks. Phase 3 adds the atomic-release gate checks.
 import importlib.util
 import os
 import re
+import shutil
+import subprocess
+import tempfile
+import textwrap
 import unittest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -1009,6 +1013,58 @@ def publish_effects(verdict):
     return False, False
 
 
+PUBLIC_RELEASE_TITLE_PREFIX = "Grok Bot v"
+
+
+def public_release_title(version):
+    """User-facing public release title: exactly `Grok Bot v${VERSION}`."""
+    return f"{PUBLIC_RELEASE_TITLE_PREFIX}{version}"
+
+
+def versions_from_tags(tags):
+    """Collect published versions from trusted tag provenance.
+
+    Accepts public `vX.Y.Z` tags and internal `flatpak/X.Y.Z-rN`
+    tags; anything else is ignored. Returns a sorted list of
+    unique `X.Y.Z` strings.
+    """
+    found = set()
+    for tag in tags or []:
+        text = str(tag or "").strip()
+        if re.match(r"^v\d+\.\d+\.\d+$", text):
+            found.add(text[1:])
+            continue
+        match = re.match(r"^flatpak/(\d+\.\d+\.\d+)-r\d+$", text)
+        if match:
+            found.add(match.group(1))
+    return sorted(found, key=lambda item: tuple(int(part) for part in item.split(".")))
+
+
+def is_new_upstream_version(current, published_versions):
+    """True only when current is absent from provenance and strictly newer.
+
+    Same-version repins and older versions never auto-publish; an empty
+    provenance (first release bootstrap) accepts any valid version.
+    """
+    if not re.match(r"^\d+\.\d+\.\d+$", str(current or "")):
+        return False
+    published = [str(item) for item in published_versions or [] if re.match(r"^\d+\.\d+\.\d+$", str(item or ""))]
+    if current in published:
+        return False
+    if not published:
+        # Bootstrap only when provenance is truly empty; corrupt
+        # provenance (entries present but none valid) fails closed.
+        return not (published_versions or [])
+    key = tuple(int(part) for part in str(current).split("."))
+    highest = max(tuple(int(part) for part in item.split(".")) for item in published)
+    return key > highest
+
+
+def should_auto_publish(current, published_versions):
+    """Ordinary pushes never auto-publish; only a new upstream version does."""
+    return is_new_upstream_version(current, published_versions)
+
+
 def manifest_arch_sources(manifest_text):
     """Map arch -> (url, sha256) from the manifest per-arch file sources."""
     sources = {}
@@ -1223,19 +1279,29 @@ class AtomicContentContractTests(unittest.TestCase):
         text = read_repo_text(PUBLISH_WORKFLOW_PATH)
         self.assertIn("workflows: [x3]", text)
         self.assertNotIn("workflows: [validate]", text)
+        self.assertNotIn("pull_request", text)
         self.assertIn("types: [completed]", text)
         self.assertIn("branches: [main]", text)
         self.assertIn("x86_64", text)
         self.assertIn("aarch64", text)
         self.assertIn("success", text)
         self.assertIn("workflow_run", text)
-        self.assertIn("github.event.workflow_run.conclusion == 'success'", text)
-        self.assertIn("event == 'workflow_run'", text)
-        self.assertIn("github.event.workflow_run.head_branch == 'main'", text)
+        # The automatic path still requires a successful chain X3 run on
+        # main, evaluated inside the decide job from trusted env provenance.
+        self.assertIn("github.event.workflow_run.conclusion", text)
+        self.assertIn("github.event.workflow_run.event", text)
+        self.assertIn("github.event.workflow_run.head_branch", text)
+        self.assertIn("TRIGGER_CONCLUSION", text)
+        self.assertIn("TRIGGER_EVENT", text)
+        self.assertIn("TRIGGER_BRANCH", text)
+        self.assertIn("not a successful chain X3 run on main", text)
         self.assertIn("head_branch", text)
         self.assertIn("head_sha", text)
-        self.assertNotIn("event == 'workflow_dispatch'", text)
-        self.assertNotIn("event == 'push'", text)
+        # The explicit manual path needs an exact SHA plus a reason, never bare.
+        self.assertIn("workflow_dispatch:", text)
+        self.assertIn("inputs.sha", text)
+        self.assertIn("inputs.reason", text)
+        self.assertIn("required: true", text)
         for secret in REQUIRED_PUBLISH_SECRETS:
             self.assertIn(f"secrets.{secret}", text)
         self.assertIn("exit 1", text)
@@ -1253,7 +1319,11 @@ class AtomicContentContractTests(unittest.TestCase):
         self.assertIn("flatpak/deployed-*-r*", text)
         self.assertIn("flatpak/deployed-${VERSION}-r${RELEASE_R}", text)
         self.assertIn("--sort=-v:refname", text)
-        self.assertIn("--points-at", text)
+        # The exact build tag is derived from the marker name and
+        # verified same-commit; a deployed marker (no release asset)
+        # is never selected for download.
+        self.assertNotIn("--points-at", text)
+        self.assertIn("refusing to download a deployed marker", text)
         self.assertIn('gh release download "${REL_TAG}"', text)
 
     def test_publish_tag_step_uses_revisioned_tags(self):
@@ -1352,6 +1422,500 @@ class PublishTransportContractTests(unittest.TestCase):
         self.assertLess(upload_idx, deploy_idx)
         self.assertLess(recover_idx, first_cond_idx)
         self.assertLess(first_cond_idx, second_cond_idx)
+
+
+class ReleaseBehaviorContractTests(unittest.TestCase):
+    """User-approved release behavior.
+
+    Ordinary pushes to main validate but never auto-publish. Only a
+    genuinely new upstream version traverses validate, dual-arch X3,
+    and publish automatically; same-version repins no-op. Packaging
+    republishes at the same version run only through explicit manual
+    dispatch bound to one exact proven commit. The public release is
+    exactly `Grok Bot v${VERSION}` and same-version updates rewrite
+    that entry instead of adding another one, while new internal
+    `flatpak/${VERSION}-rN` backups stay draft (hidden, never Latest)
+    and rollback still retrieves the exact prior backup.
+    """
+
+    def test_public_title_is_exact(self):
+        self.assertEqual(public_release_title("0.47.0"), "Grok Bot v0.47.0")
+        self.assertEqual(public_release_title("0.48.0"), "Grok Bot v0.48.0")
+
+    def test_new_upstream_version_auto_publishes(self):
+        self.assertTrue(should_auto_publish("0.48.0", ["0.47.0"]))
+        self.assertTrue(
+            should_auto_publish("0.48.0", ["0.46.0", "0.47.0"])
+        )
+
+    def test_same_version_repin_never_auto_publishes(self):
+        self.assertFalse(should_auto_publish("0.47.0", ["0.47.0"]))
+        self.assertFalse(
+            should_auto_publish("0.47.0", ["0.46.0", "0.47.0"])
+        )
+
+    def test_ordinary_push_at_published_version_never_auto_publishes(self):
+        # Docs and packaging-only changes keep the pinned version, so
+        # the automatic chain must stay silent for them.
+        self.assertFalse(should_auto_publish("0.47.0", ["0.47.0"]))
+        self.assertFalse(is_new_upstream_version("0.47.0", ["0.47.0"]))
+
+    def test_older_version_never_auto_publishes(self):
+        self.assertFalse(should_auto_publish("0.46.0", ["0.47.0"]))
+        self.assertFalse(
+            should_auto_publish("0.47.0", ["0.47.0", "0.48.0"])
+        )
+
+    def test_first_release_bootstrap_publishes(self):
+        self.assertTrue(should_auto_publish("0.47.0", []))
+
+    def test_malformed_versions_never_auto_publish(self):
+        self.assertFalse(should_auto_publish("", ["0.47.0"]))
+        self.assertFalse(should_auto_publish("bogus", ["0.47.0"]))
+        self.assertFalse(should_auto_publish(None, ["0.47.0"]))
+        self.assertFalse(is_new_upstream_version("0.48.0", ["bogus"]))
+
+    def test_versions_from_tags_reads_both_namespaces(self):
+        tags = ["v0.47.0", "flatpak/0.47.0-r3", "flatpak/0.46.0-r1"]
+        self.assertEqual(
+            versions_from_tags(tags), ["0.46.0", "0.47.0"]
+        )
+
+    def test_versions_from_tags_ignores_foreign_tags(self):
+        tags = [
+            "v0.47.0",
+            "flatpak/deployed-0.47.0-r3",
+            "nightly",
+            "",
+            None,
+        ]
+        self.assertEqual(versions_from_tags(tags), ["0.47.0"])
+
+    def test_ordinary_push_has_no_automatic_publication(self):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        self.assertIn("skipping automatic publication", text)
+        self.assertIn("no-op success", text)
+        self.assertIn("proceed=false", text)
+        self.assertIn("needs.decide.outputs.proceed == 'true'", text)
+
+    def test_new_version_gate_uses_trusted_tag_provenance(self):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        # Strict numeric-semver globs: deployed markers never enter.
+        self.assertIn("git tag --list 'v[0-9]*'", text)
+        self.assertIn("git tag --list 'flatpak/[0-9]*-r*'", text)
+        self.assertNotIn("flatpak/\\(.*\\)-r", text)
+        self.assertIn("sort -V", text)
+        self.assertIn("grep -Fxq", text)
+        self.assertIn("is_new", text)
+        # Provenance is tags, never commit-message magic.
+        self.assertNotIn("commit message", text.lower())
+        self.assertIn("git show", text)
+        self.assertIn("data/pins.yml", text)
+
+    def test_manual_dispatch_requires_exact_sha_and_reason(self):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        self.assertIn("INPUT_SHA: ${{ inputs.sha }}", text)
+        self.assertIn("INPUT_REASON: ${{ inputs.reason }}", text)
+        self.assertIn("40-char hex commit SHA", text)
+        self.assertIn("manual publish requires a reason", text)
+        self.assertIn("merge-base --is-ancestor", text)
+        self.assertIn("origin/main", text)
+
+    def test_manual_path_verifies_validate_and_x3_for_exact_sha(self):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        self.assertIn("validate.yml/runs?head_sha=${SHA}", text)
+        self.assertIn("x3.yml/runs?head_sha=${SHA}", text)
+        self.assertIn("no successful validate run for", text)
+        self.assertIn("no successful dual-arch X3 run for", text)
+        self.assertIn("refusing to publish without validation", text)
+        self.assertIn("refusing to publish without X3 proof", text)
+
+    def test_chain_bound_to_decided_sha(self):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        self.assertIn("decide:", text)
+        self.assertGreaterEqual(
+            text.count("needs.decide.outputs.sha"), 6
+        )
+        self.assertIn('ref: ${{ needs.decide.outputs.sha }}', text)
+        self.assertIn("HEAD_SHA: ${{ needs.decide.outputs.sha }}", text)
+        self.assertIn("PINNED_VERSION: ${{ needs.decide.outputs.version }}", text)
+
+    def test_public_release_title_exact_and_updated_not_duplicated(self):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        self.assertIn('PUBLIC_TAG="v${VERSION}"', text)
+        self.assertIn('PUBLIC_TITLE="Grok Bot v${VERSION}"', text)
+        self.assertIn('--title "${PUBLIC_TITLE}"', text)
+        self.assertIn(
+            'gh release upload "${PUBLIC_TAG}" site.tar.gz --clobber', text
+        )
+        self.assertIn('--target "${HEAD_SHA}"', text)
+        self.assertIn("no new public release entry", text)
+        self.assertNotIn("Atomic Flatpak Release", text)
+        # The public entry is published: the public step never drafts.
+        public_step = text.split("Create or update the public release", 1)[1]
+        self.assertNotIn("--draft", public_step)
+
+    def test_internal_revision_tags_preserved_for_rollback(self):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        self.assertIn('git tag --list "flatpak/${VERSION}-r*"', text)
+        self.assertIn("flatpak/${VERSION}-r${N}", text)
+        self.assertIn("flatpak/deployed-${VERSION}-r${RELEASE_R}", text)
+        self.assertIn('gh release download "${REL_TAG}"', text)
+
+    def test_new_internal_backups_are_draft_never_public(self):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        internal_step = text.split(
+            "Tag the internal build for audit and rollback", 1
+        )[1].split("Create or update the public release", 1)[0]
+        # New per-build backups must not become extra public entries:
+        # they are created as drafts (hidden, never Latest).
+        self.assertIn('gh release create "${TAG}" site.tar.gz', internal_step)
+        self.assertIn("--draft", internal_step)
+        # Drafts are never published back and legacy releases are
+        # never deleted or rewritten by this workflow.
+        self.assertNotIn("--draft=false", text)
+        self.assertNotIn("gh release delete", text)
+        # Rollback retrieves the exact prior backup by explicit tag
+        # with GH_TOKEN, covering legacy public and new draft backups.
+        self.assertIn('gh release download "${REL_TAG}"', text)
+
+    def test_diagnostic_and_pr_runs_cannot_publish_without_intent(self):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        self.assertNotIn("pull_request", text)
+        self.assertIn("not a successful chain X3 run on main", text)
+        # A manual diagnostic X3 run (workflow_dispatch event) still
+        # reaches the no-op branch of the automatic path.
+        self.assertIn("TRIGGER_EVENT", text)
+
+
+    def test_diagnostic_and_pr_runs_cannot_publish_without_intent(self):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        self.assertNotIn("pull_request", text)
+        self.assertIn("not a successful chain X3 run on main", text)
+        # A manual diagnostic X3 run (workflow_dispatch event) still
+        # reaches the no-op branch of the automatic path.
+        self.assertIn("TRIGGER_EVENT", text)
+
+
+def require_git(testcase):
+    if shutil.which("git") is None or shutil.which("bash") is None:
+        testcase.skipTest("git and bash are required for shell-harness tests")
+
+
+def extract_verbatim_block(text, begin_marker, end_marker):
+    """Slice the exact shell between two workflow anchor comments."""
+    start = text.index(begin_marker)
+    stop = text.index(end_marker, start)
+    return textwrap.dedent(text[start:stop])
+
+
+def run_harness(script, env=None, cwd=None):
+    """Run a harness script with bash; return the completed process."""
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".sh", delete=False
+    ) as handle:
+        handle.write(script)
+        path = handle.name
+    try:
+        return subprocess.run(
+            ["bash", path],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=cwd,
+            timeout=60,
+        )
+    finally:
+        os.unlink(path)
+
+
+def parse_github_outputs(path):
+    outputs = {}
+    with open(path, "r", encoding="utf-8") as handle:
+        for line in handle.read().splitlines():
+            if "=" in line:
+                key, _, value = line.partition("=")
+                outputs[key.strip()] = value.strip()
+    return outputs
+
+
+class ShellHarnessContractTests(unittest.TestCase):
+    """Execute the ACTUAL publish.yml shell blocks in fake harnesses.
+
+    Substring assertions alone passed while the provenance glob leaked
+    deployed markers and rollback resolved a marker with no release,
+    so these tests run the verbatim workflow shell against controlled
+    local git repos (plus a fake gh shim) and assert real behavior.
+    """
+
+    def make_repo(self):
+        require_git(self)
+        tmp = tempfile.mkdtemp(prefix="publish-harness-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        subprocess.run(
+            ["git", "init", "-q", "-b", "main", tmp], check=True
+        )
+        subprocess.run(
+            ["git", "-C", tmp, "config", "user.email", "harness@test"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", tmp, "config", "user.name", "harness"],
+            check=True,
+        )
+        return tmp
+
+    def commit_empty(self, repo, message="harness"):
+        subprocess.run(
+            ["git", "-C", repo, "commit", "-q", "--allow-empty",
+             "-m", message],
+            check=True,
+        )
+        proc = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        )
+        return proc.stdout.strip()
+
+    def tag(self, repo, name, ref="HEAD"):
+        subprocess.run(
+            ["git", "-C", repo, "tag", name, ref], check=True
+        )
+
+    def seed_release_tags(self, repo):
+        """Mirror the real repo: build and deployed tags coexist."""
+        self.commit_empty(repo, "base")
+        self.tag(repo, "flatpak/0.46.0-r1")
+        self.tag(repo, "flatpak/deployed-0.46.0-r1")
+        self.commit_empty(repo, "current")
+        self.tag(repo, "flatpak/0.47.0-r10")
+        self.tag(repo, "flatpak/deployed-0.47.0-r10")
+
+    def run_newness_gate(self, repo, version, mode="auto"):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        block = extract_verbatim_block(
+            text, "# BEGIN version-newness gate", "# END version-newness gate"
+        )
+        outputs = os.path.join(repo, "gate-outputs")
+        head = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        script = (
+            "set -euo pipefail\n"
+            f'cd "{repo}"\n'
+            f'VERSION="{version}"\n'
+            f'MODE="{mode}"\n'
+            f'SHA="{head}"\n'
+            f'GITHUB_OUTPUT="{outputs}"\n'
+            ": > \"$GITHUB_OUTPUT\"\n"
+            + block
+        )
+        proc = run_harness(script)
+        self.assertEqual(
+            proc.returncode, 0,
+            f"gate harness failed: {proc.stderr}",
+        )
+        return parse_github_outputs(outputs)
+
+    def test_real_new_version_proceeds_despite_deployed_markers(self):
+        repo = self.make_repo()
+        self.seed_release_tags(repo)
+        outputs = self.run_newness_gate(repo, "0.48.0")
+        self.assertEqual(outputs.get("proceed"), "true")
+        self.assertEqual(outputs.get("is_new"), "true")
+        self.assertEqual(outputs.get("version"), "0.48.0")
+        self.assertEqual(outputs.get("mode"), "auto")
+
+    def test_real_same_version_noops_despite_deployed_markers(self):
+        repo = self.make_repo()
+        self.seed_release_tags(repo)
+        outputs = self.run_newness_gate(repo, "0.47.0")
+        self.assertEqual(outputs.get("proceed"), "false")
+        self.assertEqual(outputs.get("is_new"), "false")
+
+    def test_real_provenance_excludes_deployed_markers(self):
+        require_git(self)
+        repo = self.make_repo()
+        self.seed_release_tags(repo)
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        line = next(
+            raw.strip()
+            for raw in text.splitlines()
+            if "PUBLISHED=\"$(" in raw
+        )
+        script = (
+            "set -euo pipefail\n"
+            f'cd "{repo}"\n'
+            + line + "\n"
+            "printf '%s\\n' \"${PUBLISHED}\"\n"
+        )
+        proc = run_harness(script)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            sorted(proc.stdout.split()), ["0.46.0", "0.47.0"]
+        )
+        self.assertNotIn("deployed", proc.stdout)
+
+    def run_rollback_derivation(self, repo):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        block = extract_verbatim_block(
+            text,
+            "# BEGIN rollback-tag derivation",
+            "# END rollback-tag derivation.",
+        )
+        outputs = os.path.join(repo, "rollback-outputs")
+        script = (
+            "set -euo pipefail\n"
+            f'cd "{repo}"\n'
+            f'GITHUB_OUTPUT="{outputs}"\n'
+            ": > \"$GITHUB_OUTPUT\"\n"
+            + block
+            + 'echo "HARNESS_PREV_TAG=${PREV_TAG}"\n'
+            + 'echo "HARNESS_REL_TAG=${REL_TAG}"\n'
+        )
+        return run_harness(script), outputs
+
+    def test_real_rollback_resolves_exact_build_tag(self):
+        repo = self.make_repo()
+        self.commit_empty(repo, "first")
+        self.tag(repo, "flatpak/0.47.0-r9")
+        self.tag(repo, "flatpak/deployed-0.47.0-r9")
+        self.commit_empty(repo, "second")
+        self.tag(repo, "flatpak/0.47.0-r10")
+        self.tag(repo, "flatpak/deployed-0.47.0-r10")
+        proc, _ = self.run_rollback_derivation(repo)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("HARNESS_PREV_TAG=flatpak/deployed-0.47.0-r10",
+                      proc.stdout)
+        # The exact build tag — never the deployed marker, which has
+        # no release asset to download.
+        self.assertIn("HARNESS_REL_TAG=flatpak/0.47.0-r10", proc.stdout)
+        self.assertNotIn("HARNESS_REL_TAG=flatpak/deployed-", proc.stdout)
+
+    def test_real_rollback_first_release_noops(self):
+        repo = self.make_repo()
+        self.commit_empty(repo, "only")
+        proc, outputs = self.run_rollback_derivation(repo)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(
+            parse_github_outputs(outputs).get("recovered"), "false"
+        )
+
+    def make_manual_repo(self, version="0.48.0"):
+        repo = self.make_repo()
+        pins = os.path.join(repo, "data")
+        os.makedirs(pins, exist_ok=True)
+        with open(os.path.join(pins, "pins.yml"), "w",
+                  encoding="utf-8") as handle:
+            handle.write(f"version: {version}\n")
+        subprocess.run(["git", "-C", repo, "add", "."], check=True)
+        sha = self.commit_empty(repo, "packaging fix")
+        subprocess.run(
+            ["git", "-C", repo, "update-ref",
+             "refs/remotes/origin/main", sha],
+            check=True,
+        )
+        return repo, sha
+
+    def make_fake_gh(self, validate_count="1", x3_count="1"):
+        """A fake gh shim answering runs-API queries with fixed counts."""
+        bindir = tempfile.mkdtemp(prefix="fake-gh-")
+        self.addCleanup(shutil.rmtree, bindir, True)
+        shim = os.path.join(bindir, "gh")
+        with open(shim, "w", encoding="utf-8") as handle:
+            handle.write(
+                "#!/bin/bash\n"
+                'case "$*" in\n'
+                f'  *validate.yml*) printf \'%s\' "{validate_count}" ;;\n'
+                f'  *x3.yml*) printf \'%s\' "{x3_count}" ;;\n'
+                '  *) printf \'0\' ;;\n'
+                "esac\n"
+            )
+        os.chmod(shim, 0o755)
+        return bindir
+
+    def run_manual_gate(self, repo, sha, version, extra_env=None,
+                        validate_count="1", x3_count="1"):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        block = extract_verbatim_block(
+            text, "# BEGIN manual proof gate", "# END manual proof gate."
+        )
+        script = (
+            "set -euo pipefail\n"
+            f'cd "{repo}"\n'
+            + block
+            + 'echo "MANUAL_GATE=PASS"\n'
+        )
+        env = dict(os.environ)
+        env["MODE"] = "manual"
+        env["SHA"] = sha
+        env["VERSION"] = version
+        env["GITHUB_REPOSITORY"] = "owner/repo"
+        env["PATH"] = (
+            self.make_fake_gh(validate_count, x3_count)
+            + os.pathsep + env["PATH"]
+        )
+        if extra_env:
+            env.update(extra_env)
+        return run_harness(script, env=env)
+
+    def test_real_manual_gate_passes_for_proven_sha(self):
+        repo, sha = self.make_manual_repo("0.48.0")
+        proc = self.run_manual_gate(repo, sha, "0.48.0")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("MANUAL_GATE=PASS", proc.stdout)
+
+    def test_real_manual_gate_rejects_missing_validate(self):
+        repo, sha = self.make_manual_repo("0.48.0")
+        proc = self.run_manual_gate(
+            repo, sha, "0.48.0", validate_count="0"
+        )
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("no successful validate run", proc.stderr)
+
+    def test_real_manual_gate_rejects_missing_x3(self):
+        repo, sha = self.make_manual_repo("0.48.0")
+        proc = self.run_manual_gate(repo, sha, "0.48.0", x3_count="0")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("no successful dual-arch X3 run", proc.stderr)
+
+    def test_real_manual_gate_rejects_stale_sha(self):
+        repo, first = self.make_manual_repo("0.48.0")
+        # origin/main stays at the first commit; a newer commit that
+        # is not its ancestor must not publish.
+        subprocess.run(
+            ["git", "-C", repo, "commit", "-q", "--allow-empty",
+             "-m", "later"],
+            check=True,
+        )
+        later = subprocess.run(
+            ["git", "-C", repo, "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        self.assertNotEqual(first, later)
+        proc = self.run_manual_gate(repo, later, "0.48.0")
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("not on main history", proc.stderr)
+
+    def test_decide_job_has_effective_actions_read(self):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        start = text.index("\n  decide:\n")
+        following = text.index("\n  build-x86_64:", start)
+        decide = text[start:following]
+        perm = decide.index("    permissions:\n")
+        permlines = []
+        for raw in decide[perm:].splitlines()[1:]:
+            if raw.startswith("      ") and ":" in raw:
+                permlines.append(raw.strip())
+            elif raw.strip() == "":
+                continue
+            else:
+                break
+        self.assertIn("contents: read", permlines)
+        # The manual proof gate queries the Actions runs API, which
+        # needs actions:read beyond the top-level contents:read.
+        self.assertIn("actions: read", permlines)
 
 
 if __name__ == "__main__":

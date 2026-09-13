@@ -56,7 +56,27 @@ flatpak remote-delete --user grok-bot
 
 ## Release model
 
-Each Stable Upstream Release is accepted only when every supported architecture has a verified Upstream Artifact and Source Checksum. Reproducible integration changes produce the Packaged Payload, which is validated on both architectures before publication as one Atomic Flatpak Release.
+Ordinary pushes to `main` validate but never automatically publish — including docs and packaging-only changes.
+
+| Change | What happens |
+|--------|--------------|
+| Ordinary push to `main` | Validate runs (plus automatic X3 proof). No release. |
+| New upstream version via the six-hour pin workflow | Automatically traverses validate, dual-arch X3 proof, and publish. Same-version repins do not auto-publish. |
+| Packaging fix at the same upstream version | Publish manually (see below). Updates the existing `Grok Bot v${VERSION}` release and the Flatpak repository; no new public release entry. |
+
+Each Stable Upstream Release is accepted only when every supported architecture has a verified Upstream Artifact and Source Checksum. Reproducible integration changes produce the Packaged Payload, which is validated on both architectures before publication.
+
+### Manual publish
+
+```bash
+gh workflow run publish.yml --ref main -f sha=<40-char commit SHA on main> -f reason="why this republish is needed"
+```
+
+The commit must already have a successful validate run and a successful dual-arch X3 run for that exact SHA; otherwise the run fails closed and publishes nothing.
+
+### Releases
+
+The public release is titled exactly `Grok Bot v${VERSION}` (tag `v${VERSION}`) — the only published entry per version. New internal `flatpak/${VERSION}-rN` backups are saved as hidden draft releases (never in the public list, never Latest); `flatpak/deployed-${VERSION}-rN` markers stay for rollback. Legacy public backup releases are left untouched.
 
 Users install and receive updates from the [Flatpak Repository](https://viniciosrab.github.io/grok-bot-flatpak/). The `site.tar.gz` files attached to [GitHub Releases](https://github.com/viniciosrab/grok-bot-flatpak/releases) are publication audit and rollback artifacts, not application installers.
 
