@@ -57,6 +57,8 @@ modules:
         path: data/io.github.viniciosrab.GrokBot.desktop
       - type: file
         path: data/io.github.viniciosrab.GrokBot.metainfo.xml
+      - type: file
+        path: tools/patch_electron_native_frame.py
     build-commands:
       - |
         set -euo pipefail
@@ -85,35 +87,39 @@ modules:
         cp -a grok-bot-unpacked/. /app/grok-bot/
         printf '#!/bin/sh\nexport CHROME_DESKTOP=io.github.viniciosrab.GrokBot.desktop\nexec /app/bin/zypak-wrapper "/app/grok-bot/%s" --password-store=basic "$@"\n' "${ELECTRON_ENTRY}" > /app/bin/grok-bot-electron
         chmod 755 /app/bin/grok-bot-electron
+        test -f /app/grok-bot/resources/app.asar || { echo "missing packed Electron app.asar" >&2; exit 1; }
+        python3 patch_electron_native_frame.py /app/grok-bot/resources/app.asar
         cp -a grok-bot-unpacked/usr/share/icons/hicolor/. /app/share/icons/hicolor/
-        test -f grok-bot-unpacked/resources/icon.png || { echo "missing rounded vendor icon source" >&2; exit 1; }
-        # Preserve the original unpadded upstream source before the Electron
-        # resource is replaced with the padded version.
+        # Preserve the original rounded vendor Electron resource before any
+        # replacement. The tray prefers these exact unpadded bytes on its
+        # existing 16-on-22 canvas; do not route the tray through hicolor.
         install -m644 grok-bot-unpacked/resources/icon.png /app/grok-bot/resources/icon.upstream.png
-        # Deterministic app-id icons from the rounded vendor source. The
-        # upstream artwork is centered at 8/11 of each canvas on a
-        # transparent background so small launcher and taskbar sizes keep
-        # visible padding instead of collapsing into a square. Exported
-        # app-id icons stop at 512 (flatpak-builder export limit); the
-        # padded 1024 Electron window icon is generated separately below
-        # and never placed under hicolor. The SDK ffmpeg renders each size
-        # with fixed lanczos scaling and bitexact flags so rebuilds
-        # produce identical PNGs.
-        if [ -x /usr/bin/ffmpeg ]; then
+        # Taskbar/window/app-id use 10/11 inner artwork on a transparent
+        # canvas (~91%, KDE-like 20/22 padding). Do not shrink that inner
+        # ratio or use unpadded full-canvas scale. Require SDK ffmpeg; do
+        # not apply the tray 16-on-22 canvas to the taskbar. Exported
+        # app-id icons stop at 512.
+        ROUNDED_ICON="grok-bot-unpacked/resources/icon.png"
+        test -f "${ROUNDED_ICON}" || { echo "missing rounded vendor icon source" >&2; exit 1; }
+        test -x /usr/bin/ffmpeg || { echo "ffmpeg required to scale app-id icons" >&2; exit 1; }
         for size in 16 24 32 48 64 128 256 512; do
           install -d "/app/share/icons/hicolor/${size}x${size}/apps"
-          inner=$((size*8/11))
-          /usr/bin/ffmpeg -y -v error -i grok-bot-unpacked/resources/icon.png -vf "scale=${inner}:${inner}:flags=lanczos,pad=${size}:${size}:(ow-iw)/2:(oh-ih)/2:color=0x00000000" -pix_fmt rgba -compression_level 9 -fflags +bitexact -flags:v +bitexact "/app/share/icons/hicolor/${size}x${size}/apps/io.github.viniciosrab.GrokBot.png"
+          inner=$((size*10/11))
+          /usr/bin/ffmpeg -y -v error -i "${ROUNDED_ICON}" -vf "scale=${inner}:${inner}:flags=lanczos,pad=${size}:${size}:(ow-iw)/2:(oh-ih)/2:color=0x00000000" -pix_fmt rgba -compression_level 9 -fflags +bitexact -flags:v +bitexact "/app/share/icons/hicolor/${size}x${size}/apps/io.github.viniciosrab.GrokBot.png"
+          # StartupWMClass=grok-bot makes Plasma look up vendor-named
+          # grok-bot.png. Overwrite those files with the same padded
+          # bytes just written for the app-id icon.
+          install -m644 "/app/share/icons/hicolor/${size}x${size}/apps/io.github.viniciosrab.GrokBot.png" "/app/share/icons/hicolor/${size}x${size}/apps/grok-bot.png"
+          if test -f "/app/grok-bot/usr/share/icons/hicolor/${size}x${size}/apps/grok-bot.png"; then
+            install -m644 "/app/share/icons/hicolor/${size}x${size}/apps/io.github.viniciosrab.GrokBot.png" "/app/grok-bot/usr/share/icons/hicolor/${size}x${size}/apps/grok-bot.png"
+          fi
         done
-        inner1024=$((1024*8/11))
-        /usr/bin/ffmpeg -y -v error -i /app/grok-bot/resources/icon.upstream.png -vf "scale=${inner1024}:${inner1024}:flags=lanczos,pad=1024:1024:(ow-iw)/2:(oh-ih)/2:color=0x00000000" -pix_fmt rgba -compression_level 9 -fflags +bitexact -flags:v +bitexact /app/grok-bot/resources/icon.png
-        else
-          for size in 16 24 32 48 64 128 256 512; do
-            install -d "/app/share/icons/hicolor/${size}x${size}/apps"
-            install -m644 grok-bot-unpacked/resources/icon.png "/app/share/icons/hicolor/${size}x${size}/apps/io.github.viniciosrab.GrokBot.png"
-          done
-          install -m644 /app/grok-bot/resources/icon.upstream.png /app/grok-bot/resources/icon.png
-        fi
+        # Electron/KDE taskbar uses grok-bot.png next to the binary (WM class
+        # grok-bot) and may also read resources/icon.png. Both must be the
+        # 10/11-padded 1024 canvas, not unpadded full-canvas.
+        inner=$((1024*10/11))
+        /usr/bin/ffmpeg -y -v error -i "${ROUNDED_ICON}" -vf "scale=${inner}:${inner}:flags=lanczos,pad=1024:1024:(ow-iw)/2:(oh-ih)/2:color=0x00000000" -pix_fmt rgba -compression_level 9 -fflags +bitexact -flags:v +bitexact /app/grok-bot/resources/icon.png
+        /usr/bin/ffmpeg -y -v error -i "${ROUNDED_ICON}" -vf "scale=${inner}:${inner}:flags=lanczos,pad=1024:1024:(ow-iw)/2:(oh-ih)/2:color=0x00000000" -pix_fmt rgba -compression_level 9 -fflags +bitexact -flags:v +bitexact /app/grok-bot/grok-bot.png
         install -Dm644 io.github.viniciosrab.GrokBot.desktop /app/share/applications/io.github.viniciosrab.GrokBot.desktop
         install -Dm644 io.github.viniciosrab.GrokBot.metainfo.xml /app/share/metainfo/io.github.viniciosrab.GrokBot.metainfo.xml
 
