@@ -9,6 +9,16 @@ body:
       value: |
         Thanks for helping improve this unofficial Flatpak. Do not include credentials, authentication callbacks, tokens, or other secrets.
 
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission checks
+      options:
+        - label: I searched open and closed issues for an existing report.
+          required: true
+        - label: I removed credentials, tokens, authentication callbacks, and other secrets.
+          required: true
+
   - type: input
     id: summary
     attributes:
@@ -84,13 +94,3 @@ body:
       render: shell
     validations:
       required: false
-
-  - type: checkboxes
-    id: checks
-    attributes:
-      label: Pre-submission checks
-      options:
-        - label: I searched open and closed issues for an existing report.
-          required: true
-        - label: I removed credentials, tokens, authentication callbacks, and other secrets.
-          required: true

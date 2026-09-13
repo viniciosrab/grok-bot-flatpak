@@ -9,6 +9,16 @@ body:
       value: |
         Thanks for proposing an improvement. Describe the user-facing outcome rather than only an implementation detail.
 
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission checks
+      options:
+        - label: I searched open and closed issues for an existing request.
+          required: true
+        - label: This request does not include credentials, tokens, authentication callbacks, or other secrets.
+          required: true
+
   - type: input
     id: summary
     attributes:
@@ -54,13 +64,3 @@ body:
         - Other or unknown
     validations:
       required: true
-
-  - type: checkboxes
-    id: checks
-    attributes:
-      label: Pre-submission checks
-      options:
-        - label: I searched open and closed issues for an existing request.
-          required: true
-        - label: This request does not include credentials, tokens, authentication callbacks, or other secrets.
-          required: true
