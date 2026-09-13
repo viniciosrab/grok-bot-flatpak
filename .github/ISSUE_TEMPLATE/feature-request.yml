@@ -1,0 +1,66 @@
+name: Feature request
+description: Propose an improvement to the unofficial Grok Bot Flatpak
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for proposing an improvement. Describe the user-facing outcome rather than only an implementation detail.
+
+  - type: input
+    id: summary
+    attributes:
+      label: Improvement summary
+      description: Briefly describe the improvement.
+      placeholder: Integrate Grok Bot more naturally with...
+    validations:
+      required: true
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Explain the current limitation and who benefits from changing it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed behavior
+      description: Describe the desired user-facing behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe reasonable alternatives or workarounds, if any.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: architecture
+    attributes:
+      label: Architecture
+      description: Select the architecture where this improvement applies.
+      options:
+        - All supported architectures
+        - x86_64
+        - aarch64
+        - Other or unknown
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission checks
+      options:
+        - label: I searched open and closed issues for an existing request.
+          required: true
+        - label: This request does not include credentials, tokens, authentication callbacks, or other secrets.
+          required: true
