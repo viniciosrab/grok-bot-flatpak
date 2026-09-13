@@ -1,18 +1,44 @@
-# Publish job: one Atomic Flatpak Release after automatic X3 proof passes.
+# Publish job: version-gated publication after X3 proof passes.
 #
-# Signing and Pages publication run only when the automatic x3 workflow
-# (triggered by successful validate on main) concludes with success for
-# main. Each architecture rebuilds
-# its own OSTree repo from the validated commit; the release job merges
-# both into one current-only site repo, signs it, prunes history, tags the
-# release for audit and rollback, and deploys to the Flatpak Repository on
-# Pages. Chain: validate on main -> x3 -> publish fits the three
-# workflow_run level limit. Checkouts use the triggering run head SHA,
-# never implicit default-branch bytes. Manual or pull request runs never
-# publish. A failed release publishes nothing; a separate rollback job redeploys
-# the tagged prior release with its own Pages upload, so the release job
-# never uploads the Pages artifact twice. Missing GPG_KEY fails closed.
-# Secrets are named, never embedded.
+# Ordinary pushes to main still validate (and still receive automatic X3
+# proof), but they MUST NOT automatically publish a release — including
+# docs and packaging-only changes. Automatic publication happens only
+# when the pin chain delivers a genuinely NEW upstream application
+# version: the decide job compares the pinned version at the intended
+# commit against trusted provenance (published `v*` and
+# `flatpak/*-r*` tags) and proceeds only when that version is newer
+# than every previously published version. Same-version repins
+# (checksum/commit refreshes) and ordinary pushes no-op with success
+# and publish nothing. Version comparison uses tag provenance only.
+#
+# Explicit packaging republishes at the SAME upstream version run only
+# through manual workflow_dispatch with a required exact commit SHA and
+# a required reason. The manual path keeps full safety: the SHA must be
+# a 40-char commit on main history, must already have a successful
+# validate run and a successful dual-arch X3 run for that exact SHA,
+# and every job checks out that exact SHA — never implicit
+# default-branch bytes and never a stale successful run. A failed
+# verification fails closed and publishes nothing. Pull request and
+# manual diagnostic (x3 workflow_dispatch) runs can never publish
+# without this explicit dispatch.
+#
+# Chain: validate on main -> x3 -> publish fits the three workflow_run
+# level limit. Manual or pull request runs never auto-publish.
+#
+# Releases: the ONLY published (public) release is tagged `v${VERSION}`
+# with the exact title `Grok Bot v${VERSION}` (no revision suffix, no
+# Atomic wording). A same-version manual republish updates that
+# EXISTING public release (`gh release upload --clobber`, no new public
+# entry) and redeploys Pages. Internal `flatpak/${VERSION}-rN` tags and
+# deployed markers `flatpak/deployed-${VERSION}-rN` stay for version
+# comparison and rollback, but NEW internal backups are saved as DRAFT
+# releases (`gh release create --draft`): hidden from the public
+# release list and never marked Latest, so the public list holds only
+# `Grok Bot vX.Y.Z` entries. Rollback downloads the backup asset by
+# explicit tag with GH_TOKEN, which retrieves both legacy public
+# backups and new draft backups. Old live releases are never deleted
+# or mutated here. Missing GPG_KEY fails closed. Secrets are named,
+# never embedded.
 
 name: publish
 
@@ -21,6 +47,14 @@ on:
     workflows: [x3]
     types: [completed]
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'Exact 40-char commit SHA on main to publish (must already have successful validate and dual-arch X3 for that SHA)'
+        required: true
+      reason:
+        description: 'Why this manual publish is needed (recorded in the run log)'
+        required: true
 
 permissions:
   contents: read
@@ -30,14 +64,187 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-x86_64:
-    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_run' && github.event.workflow_run.head_branch == 'main' }}
+  decide:
     runs-on: ubuntu-24.04
+    # Least privilege for the gate: contents to check out the decided
+    # commit, actions to query validate/X3 runs for the manual proof
+    # gate (`gh api .../actions/workflows/.../runs`). The top-level
+    # contents:read alone does not grant the Actions API.
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      proceed: ${{ steps.gate.outputs.proceed }}
+      sha: ${{ steps.gate.outputs.sha }}
+      version: ${{ steps.gate.outputs.version }}
+      mode: ${{ steps.gate.outputs.mode }}
+      is_new: ${{ steps.gate.outputs.is_new }}
     steps:
-      - name: Check out the X3-proven commit
+      - name: Check out the chain commit (automatic path)
+        if: ${{ github.event_name == 'workflow_run' }}
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Check out the requested commit (manual path)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.sha }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Resolve intent, bind the SHA, and gate on version provenance
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          TRIGGER_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+          TRIGGER_EVENT: ${{ github.event.workflow_run.event }}
+          TRIGGER_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          TRIGGER_SHA: ${{ github.event.workflow_run.head_sha }}
+          INPUT_SHA: ${{ inputs.sha }}
+          INPUT_REASON: ${{ inputs.reason }}
+        run: |
+          set -euo pipefail
+          MODE="auto"
+          SHA=""
+          if [ "${EVENT_NAME}" = "workflow_dispatch" ]; then
+            MODE="manual"
+            SHA="${INPUT_SHA}"
+            case "${SHA}" in
+              *[!0-9a-f]*|"")
+                echo "manual publish requires an exact 40-char hex commit SHA" >&2
+                exit 1
+                ;;
+            esac
+            if [ "${#SHA}" -ne 40 ]; then
+              echo "manual publish requires an exact 40-char hex commit SHA" >&2
+              exit 1
+            fi
+            if [ -z "${INPUT_REASON}" ]; then
+              echo "manual publish requires a reason; refusing to publish without explicit intent" >&2
+              exit 1
+            fi
+            echo "manual publish requested for ${SHA}: ${INPUT_REASON}"
+          elif [ "${EVENT_NAME}" = "workflow_run" ]; then
+            if [ "${TRIGGER_CONCLUSION}" != "success" ] || [ "${TRIGGER_EVENT}" != "workflow_run" ] || [ "${TRIGGER_BRANCH}" != "main" ]; then
+              echo "not a successful chain X3 run on main; skipping automatic publication (no-op success)"
+              echo "proceed=false" >> "${GITHUB_OUTPUT}"
+              echo "mode=auto" >> "${GITHUB_OUTPUT}"
+              echo "is_new=false" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            SHA="${TRIGGER_SHA}"
+            case "${SHA}" in
+              *[!0-9a-f]*|"")
+                echo "triggering SHA is malformed; failing closed" >&2
+                exit 1
+                ;;
+            esac
+            if [ "${#SHA}" -ne 40 ]; then
+              echo "triggering SHA is malformed; failing closed" >&2
+              exit 1
+            fi
+          else
+            echo "unexpected event ${EVENT_NAME}; failing closed" >&2
+            exit 1
+          fi
+          # The pinned version is read from trusted tree bytes at the
+          # intended SHA, never from commit text.
+          VERSION="$(git show "${SHA}:data/pins.yml" | grep '^version:' | awk '{print $2}')"
+          case "${VERSION}" in
+            ""|*[!0-9.]*|*..*)
+              echo "pinned version at ${SHA} is malformed; failing closed" >&2
+              exit 1
+              ;;
+          esac
+          if ! printf '%s' "${VERSION}" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "pinned version at ${SHA} is not X.Y.Z; failing closed" >&2
+            exit 1
+          fi
+          if [ "${MODE}" = "manual" ]; then
+            # BEGIN manual proof gate (executed verbatim by tests with a fake gh harness; keep self-contained: needs MODE, SHA, VERSION, GITHUB_REPOSITORY, gh on PATH).
+            # Bind the manual run to main history and to proven results
+            # for that EXACT SHA: no stale or foreign commit may publish.
+            git cat-file -e "${SHA}^{commit}" || { echo "requested SHA does not exist; failing closed" >&2; exit 1; }
+            git fetch origin main || true
+            if ! git merge-base --is-ancestor "${SHA}" origin/main; then
+              echo "requested SHA is not on main history; refusing to publish" >&2
+              exit 1
+            fi
+            PINNED_AT_SHA="$(git show "${SHA}:data/pins.yml" | grep '^version:' | awk '{print $2}')"
+            if [ "${PINNED_AT_SHA}" != "${VERSION}" ]; then
+              echo "version mismatch for requested SHA; failing closed" >&2
+              exit 1
+            fi
+            REPO="${GITHUB_REPOSITORY}"
+            VALIDATE_OK="$(gh api "repos/${REPO}/actions/workflows/validate.yml/runs?head_sha=${SHA}&status=success&per_page=20" --jq "[.workflow_runs[] | select(.conclusion == \"success\" and .head_sha == \"${SHA}\" and (.event == \"push\" or .event == \"workflow_dispatch\"))] | length")"
+            if [ "${VALIDATE_OK}" = "0" ] || [ -z "${VALIDATE_OK}" ]; then
+              echo "no successful validate run for ${SHA}; refusing to publish without validation" >&2
+              exit 1
+            fi
+            X3_OK="$(gh api "repos/${REPO}/actions/workflows/x3.yml/runs?head_sha=${SHA}&status=success&per_page=20" --jq "[.workflow_runs[] | select(.conclusion == \"success\" and .head_sha == \"${SHA}\" and (.event == \"workflow_run\" or .event == \"workflow_dispatch\"))] | length")"
+            if [ "${X3_OK}" = "0" ] || [ -z "${X3_OK}" ]; then
+              echo "no successful dual-arch X3 run for ${SHA}; refusing to publish without X3 proof" >&2
+              exit 1
+            fi
+            echo "manual intent verified: ${SHA} has successful validate and X3 for this exact SHA"
+            # END manual proof gate.
+          fi
+          # Published versions for the newness gate: strict numeric
+          # semver from public `vX.Y.Z` and internal
+          # `flatpak/X.Y.Z-rN` tags only. The `v[0-9]*` and
+          # `flatpak/[0-9]*-r*` globs plus the strict sed patterns
+          # below exclude `flatpak/deployed-*` markers BEFORE
+          # comparison, so a deployed marker can never win the
+          # `sort -V` maximum and block a genuinely new version. A
+          # version is automatically publishable only when it is
+          # absent from that set AND newer than every published
+          # version. Malformed entries match nothing and fail closed
+          # (never counted as published).
+          # BEGIN version-newness gate (executed verbatim by tests in a fake git harness; keep self-contained: needs VERSION, MODE, GITHUB_OUTPUT).
+          git fetch --tags origin || true
+          PUBLISHED="$( { git tag --list 'v[0-9]*' | sed -n 's/^v\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)$/\1/p'; git tag --list 'flatpak/[0-9]*-r*' | sed -n 's|^flatpak/\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*\)-r[0-9][0-9]*$|\1|p'; } | sort -u)"
+          IS_NEW="false"
+          if [ -n "${PUBLISHED}" ] && printf '%s\n' "${PUBLISHED}" | grep -Fxq "${VERSION}"; then
+            IS_NEW="false"
+          elif [ -z "${PUBLISHED}" ]; then
+            IS_NEW="true"
+          else
+            MAX="$(printf '%s\n%s\n' "${PUBLISHED}" "${VERSION}" | sort -V | tail -n 1)"
+            if [ "${MAX}" = "${VERSION}" ]; then
+              IS_NEW="true"
+            fi
+          fi
+          if [ "${MODE}" = "auto" ] && [ "${IS_NEW}" != "true" ]; then
+            echo "version ${VERSION} is not newer than published versions; skipping automatic publication (no-op success)"
+            echo "proceed=false" >> "${GITHUB_OUTPUT}"
+            echo "sha=${SHA}" >> "${GITHUB_OUTPUT}"
+            echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+            echo "mode=auto" >> "${GITHUB_OUTPUT}"
+            echo "is_new=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          echo "proceed=true" >> "${GITHUB_OUTPUT}"
+          echo "sha=${SHA}" >> "${GITHUB_OUTPUT}"
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "mode=${MODE}" >> "${GITHUB_OUTPUT}"
+          echo "is_new=${IS_NEW}" >> "${GITHUB_OUTPUT}"
+          echo "publish decided: mode=${MODE} sha=${SHA} version=${VERSION} is_new=${IS_NEW}"
+          # END version-newness gate.
+
+  build-x86_64:
+    needs: [decide]
+    if: ${{ needs.decide.outputs.proceed == 'true' }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the decided commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.decide.outputs.sha }}
 
       - name: Build the x86_64 OSTree repo
         run: |
@@ -55,13 +262,14 @@ jobs:
           path: repo
 
   build-aarch64:
-    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_run' && github.event.workflow_run.head_branch == 'main' }}
+    needs: [decide]
+    if: ${{ needs.decide.outputs.proceed == 'true' }}
     runs-on: ubuntu-24.04-arm
     steps:
-      - name: Check out the X3-proven commit
+      - name: Check out the decided commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ needs.decide.outputs.sha }}
 
       - name: Build the aarch64 OSTree repo
         run: |
@@ -79,8 +287,8 @@ jobs:
           path: repo
 
   release:
-    needs: [build-x86_64, build-aarch64]
-    if: ${{ github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'workflow_run' && github.event.workflow_run.head_branch == 'main' }}
+    needs: [decide, build-x86_64, build-aarch64]
+    if: ${{ needs.decide.outputs.proceed == 'true' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -89,10 +297,10 @@ jobs:
     environment:
       name: github-pages
     steps:
-      - name: Check out the X3-proven commit
+      - name: Check out the decided commit
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ needs.decide.outputs.sha }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -135,13 +343,14 @@ jobs:
           flatpak build-update-repo --prune --gpg-sign="${KEY_ID}" site
           tar -czf site.tar.gz site
 
-      - name: Tag the release for audit and rollback
+      - name: Tag the internal build for audit and rollback
         env:
           GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_SHA: ${{ needs.decide.outputs.sha }}
+          PINNED_VERSION: ${{ needs.decide.outputs.version }}
         run: |
           set -euo pipefail
-          VERSION="$(grep '^version:' data/pins.yml | awk '{print $2}')"
+          VERSION="${PINNED_VERSION}"
           test -n "${VERSION}" || { echo "missing pinned version" >&2; exit 1; }
           git fetch --tags origin || true
           LAST_R="$(git tag --list "flatpak/${VERSION}-r*" | sed -n 's/^flatpak\/.*-r\([0-9][0-9]*\)$/\1/p' | sort -n | tail -n 1)"
@@ -154,12 +363,45 @@ jobs:
           echo "RELEASE_R=${N}" >> "${GITHUB_ENV}"
           git tag "${TAG}" "${HEAD_SHA}"
           git push origin "${TAG}"
+          # New backups are DRAFT releases: hidden from the public
+          # release list and never Latest (per `gh release create
+          # --help`, `-d/--draft` saves instead of publishing). The
+          # public list therefore holds only `Grok Bot vX.Y.Z`
+          # entries. Uploading to an existing draft keeps it a draft;
+          # drafts are never published back here.
           if gh release view "${TAG}" >/dev/null 2>&1; then
             gh release upload "${TAG}" site.tar.gz --clobber
           else
             gh release create "${TAG}" site.tar.gz \
-              --title "Atomic Flatpak Release ${VERSION} -r${N} (x86_64 + aarch64)" \
-              --notes "Current-only OSTree for x86_64 and aarch64. Rollback target on failure."
+              --draft \
+              --title "Grok Bot ${VERSION} build r${N} (audit and rollback)" \
+              --notes "Internal draft backup for x86_64 and aarch64. Audit and rollback target, not an installer. See the public Grok Bot v${VERSION} release and the Pages Flatpak repository for the installable build."
+          fi
+
+      - name: Create or update the public release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ needs.decide.outputs.sha }}
+          PINNED_VERSION: ${{ needs.decide.outputs.version }}
+        run: |
+          set -euo pipefail
+          VERSION="${PINNED_VERSION}"
+          test -n "${VERSION}" || { echo "missing pinned version" >&2; exit 1; }
+          test -n "${RELEASE_R:-}" || { echo "missing internal build revision" >&2; exit 1; }
+          PUBLIC_TAG="v${VERSION}"
+          PUBLIC_TITLE="Grok Bot v${VERSION}"
+          NOTES="Unofficial Flatpak build of upstream ${VERSION} for x86_64 and aarch64 (internal build r${RELEASE_R} at ${HEAD_SHA}). Install and update from the Pages Flatpak repository; site.tar.gz is a publication audit and rollback artifact, not an installer."
+          # Published entry (not a draft): this is the single public entry
+          # per upstream version. Draft backups above stay hidden.
+          if gh release view "${PUBLIC_TAG}" >/dev/null 2>&1; then
+            echo "updating the existing public release ${PUBLIC_TAG}; no new public release entry"
+            gh release upload "${PUBLIC_TAG}" site.tar.gz --clobber
+            gh release edit "${PUBLIC_TAG}" --title "${PUBLIC_TITLE}" --notes "${NOTES}"
+          else
+            gh release create "${PUBLIC_TAG}" site.tar.gz \
+              --title "${PUBLIC_TITLE}" \
+              --notes "${NOTES}" \
+              --target "${HEAD_SHA}"
           fi
 
       - name: Deploy the Flatpak Repository to Pages
@@ -173,10 +415,11 @@ jobs:
 
       - name: Mark the deployed release
         env:
-          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          HEAD_SHA: ${{ needs.decide.outputs.sha }}
+          PINNED_VERSION: ${{ needs.decide.outputs.version }}
         run: |
           set -euo pipefail
-          VERSION="$(grep '^version:' data/pins.yml | awk '{print $2}')"
+          VERSION="${PINNED_VERSION}"
           test -n "${VERSION}" || { echo "missing pinned version" >&2; exit 1; }
           test -n "${RELEASE_R:-}" || { echo "missing release revision" >&2; exit 1; }
           MARKER="flatpak/deployed-${VERSION}-r${RELEASE_R}"
@@ -208,7 +451,7 @@ jobs:
       - name: Check out the repository with tags
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.workflow_run.head_sha }}
+          ref: ${{ needs.decide.outputs.sha }}
           fetch-depth: 0
           fetch-tags: true
 
@@ -218,6 +461,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # BEGIN rollback-tag derivation (executed verbatim by tests in a fake git harness; keep self-contained: needs a git repo with tags, GITHUB_OUTPUT).
           git fetch --tags origin || true
           PREV_TAG="$(git tag --list 'flatpak/deployed-*-r*' --sort=-v:refname | sed -n '1p')"
           if [ -z "${PREV_TAG}" ]; then
@@ -226,10 +470,26 @@ jobs:
             exit 0
           fi
           MARKER_SHA="$(git rev-list -n 1 "${PREV_TAG}")"
-          REL_TAG="$(git tag --points-at "${MARKER_SHA}" --list 'flatpak/*-r*' | sort -V | tail -n 1)"
-          test -n "${REL_TAG}" || { echo "no release tag points at ${PREV_TAG}" >&2; exit 1; }
+          # Derive the exact build tag from the marker name
+          # (flatpak/deployed-X.Y.Z-rN -> flatpak/X.Y.Z-rN) and
+          # verify it resolves to the same commit. A deployed marker
+          # is never downloaded: it carries no release asset, and the
+          # strict pattern plus the refusal below reject it
+          # fail-closed. The derived tag works for draft and legacy
+          # public backups alike (same-commit tags).
+          REL_TAG="$(printf '%s' "${PREV_TAG}" | sed -n 's|^flatpak/deployed-\([0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*-r[0-9][0-9]*\)$|flatpak/\1|p')"
+          test -n "${REL_TAG}" || { echo "deployed marker has no exact build tag; failing closed" >&2; exit 1; }
+          case "${REL_TAG}" in
+            *deployed*) echo "refusing to download a deployed marker" >&2; exit 1 ;;
+          esac
+          REL_SHA="$(git rev-list -n 1 "${REL_TAG}" 2>/dev/null)" || { echo "build tag ${REL_TAG} does not exist; failing closed" >&2; exit 1; }
+          test "${REL_SHA}" = "${MARKER_SHA}" || { echo "build tag ${REL_TAG} does not match ${PREV_TAG}; failing closed" >&2; exit 1; }
+          # END rollback-tag derivation.
           rm -f site.tar.gz
           rm -rf site
+          # Explicit-tag download with GH_TOKEN retrieves the exact
+          # prior backup whether it is a legacy public release or a
+          # new draft backup; legacy releases are never modified here.
           gh release download "${REL_TAG}" --pattern 'site.tar.gz'
           tar -xzf site.tar.gz
           test -d site || { echo "recovered ${REL_TAG} has no site directory" >&2; exit 1; }

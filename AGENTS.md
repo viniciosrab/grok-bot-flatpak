@@ -48,9 +48,9 @@ Finish-args are a closed set: ipc, wayland, fallback-x11, pulseaudio, network, d
 
 ## CI chain
 
-`validate` (PR + `main`) → automatic `x3` (successful **push** to `main` only) → `publish`. Manual/PR never publish. X3/publish check out the triggering head SHA, not implicit default-branch bytes.
+`validate` (PR + `main` + manual) → automatic `x3` (successful **push** to `main` only; manual runs are diagnostic only) → `publish` decide gate. Ordinary pushes validate but never auto-publish. Auto-publish runs only for a genuinely new upstream `data/pins.yml` version (trusted `v*`/`flatpak/*-r*` tag provenance with semver compare, never commit messages); same-version repins no-op with success. Explicit same-version packaging republishes run only via `publish.yml` workflow_dispatch with required `sha` (40-char commit on `main` history already carrying successful validate and dual-arch X3 for that exact SHA) and required `reason`. PR/manual diagnostic runs never publish without that explicit dispatch. Every publish job checks out the decided SHA, not implicit default-branch bytes.
 
-Publish merges both arch OSTree repos, recreates empty `refs/remotes` (GitHub artifacts drop them), signs with `GPG_KEY`, tags `flatpak/${VERSION}-rN`, deploys Pages. `site.tar.gz` on GitHub Releases is audit/rollback, not an installer. First-release rollback is a no-op. Pin job secrets: `APP_ID`, `APP_PRIVATE_KEY`.
+Publish merges both arch OSTree repos, recreates empty `refs/remotes` (GitHub artifacts drop them), signs with `GPG_KEY`, keeps internal `flatpak/${VERSION}-rN` build tags plus deployed markers (new backups as hidden draft releases, never public/never Latest; legacy public backups untouched), and creates-or-updates the public release `v${VERSION}` titled exactly `Grok Bot v${VERSION}` (same-version updates upload `--clobber`, never a new public entry), then deploys Pages. Manual publish command: `gh workflow run publish.yml --ref main -f sha=<SHA> -f reason="..."`. `site.tar.gz` on GitHub Releases is audit/rollback, not an installer. First-release rollback is a no-op. Pin job secrets: `APP_ID`, `APP_PRIVATE_KEY`.
 
 ## Protocol and lock
 
