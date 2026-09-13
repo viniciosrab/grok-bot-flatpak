@@ -73,6 +73,7 @@ jobs:
         run: |
           set -euo pipefail
           test -f build-dir/files/share/icons/hicolor/512x512/apps/grok-bot.png || { echo "missing Official Grok Bot Icon" >&2; exit 1; }
+          test -f build-dir/files/share/icons/hicolor/512x512/apps/io.github.viniciosrab.GrokBot.png || test -f build-dir/files/share/icons/hicolor/1024x1024/apps/io.github.viniciosrab.GrokBot.png || { echo "missing generated app-id icon" >&2; exit 1; }
           test -d build-dir/files/share/icons/hicolor || { echo "missing vendor hicolor tree" >&2; exit 1; }
           grep -qE '^Exec=/app/bin/grok-bot-companion( %u)?$' build-dir/files/share/applications/io.github.viniciosrab.GrokBot.desktop || { echo "desktop Exec must launch the companion" >&2; exit 1; }
           grep -q 'org.kde.StatusNotifierWatcher' io.github.viniciosrab.GrokBot.yml || { echo "missing StatusNotifierWatcher talk-name" >&2; exit 1; }
@@ -132,6 +133,7 @@ jobs:
         run: |
           set -euo pipefail
           test -f build-dir/files/share/icons/hicolor/512x512/apps/grok-bot.png || { echo "missing Official Grok Bot Icon" >&2; exit 1; }
+          test -f build-dir/files/share/icons/hicolor/512x512/apps/io.github.viniciosrab.GrokBot.png || test -f build-dir/files/share/icons/hicolor/1024x1024/apps/io.github.viniciosrab.GrokBot.png || { echo "missing generated app-id icon" >&2; exit 1; }
           test -d build-dir/files/share/icons/hicolor || { echo "missing vendor hicolor tree" >&2; exit 1; }
           grep -qE '^Exec=/app/bin/grok-bot-companion( %u)?$' build-dir/files/share/applications/io.github.viniciosrab.GrokBot.desktop || { echo "desktop Exec must launch the companion" >&2; exit 1; }
           grep -q 'org.kde.StatusNotifierWatcher' io.github.viniciosrab.GrokBot.yml || { echo "missing StatusNotifierWatcher talk-name" >&2; exit 1; }

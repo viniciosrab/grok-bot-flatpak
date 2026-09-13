@@ -13,7 +13,7 @@
     </p>
   </description>
   <launchable type="desktop-id">io.github.viniciosrab.GrokBot.desktop</launchable>
-  <icon type="stock">grok-bot</icon>
+  <icon type="stock">io.github.viniciosrab.GrokBot</icon>
   <provides>
     <binary>grok-bot-companion</binary>
   </provides>

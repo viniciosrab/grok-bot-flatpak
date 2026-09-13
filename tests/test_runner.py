@@ -157,13 +157,29 @@ def check_status_notifier_watcher(manifest_text, companion_src):
 
 
 def check_vendor_icon(manifest_text):
-    """Vendor 512 icon plus full hicolor tree; never a redesigned icon."""
-    if "resources/icon.png" in manifest_text:
+    """Rounded vendor source plus deterministic app-id hicolor generation.
+
+    The Official Grok Bot Icon source is the vendor-provided
+    `resources/icon.png` from the verified Upstream Artifact (transparent
+    rounded corners), not replacement artwork. The build preserves the
+    upstream hicolor tree for contracts and deterministically resizes the
+    vendor source into app-id-named icons with SDK ffmpeg. The opaque
+    `grok-bot.png` assets must never be aliased to the app-id.
+    """
+    if "resources/icon.png" not in manifest_text:
         return False
     if VENDOR_ICON_512 not in manifest_text or VENDOR_HICOLOR_TREE not in manifest_text:
         return False
-    # Flatpak exports only app-id-named icons; alias every vendor size.
-    if "-name grok-bot.png" not in manifest_text:
+    # The opaque vendor grok-bot.png assets must not be aliased to the app-id.
+    if "-name grok-bot.png" in manifest_text:
+        return False
+    if "ffmpeg" not in manifest_text:
+        return False
+    if "/usr/bin/ffmpeg" not in manifest_text:
+        return False
+    if "16 24 32 48 64 128 256 512" not in manifest_text:
+        return False
+    if "1024x1024/apps/io.github.viniciosrab.GrokBot.png" not in manifest_text or "[ -x /usr/bin/ffmpeg ]" not in manifest_text:
         return False
     return "io.github.viniciosrab.GrokBot.png" in manifest_text
 
@@ -205,7 +221,12 @@ def check_electron_exec(manifest_text, desktop_text):
 
 def check_kde_electron_runtime(manifest_text, companion_src):
     """KDE 6.11 runtime, zypak as a module (never an Electron BaseApp base),
-    companion command, and KF6 SNI lifecycle in the companion."""
+    companion command, and KF6 SNI lifecycle in the companion.
+
+    The tray centers the rounded vendor app-id icon at most 16px on a
+    transparent 22px canvas via QPainter for KDE-style padding, preferring
+    the generated 24px app-id asset. Opaque unpadded pixmaps are rejected.
+    """
     for required in ("org.kde.Platform", "org.kde.Sdk", "6.11", "zypak"):
         if required not in manifest_text:
             return False
@@ -219,14 +240,24 @@ def check_kde_electron_runtime(manifest_text, companion_src):
         "org.kde.StatusNotifierItem-",
         'setIconByName(QStringLiteral("io.github.viniciosrab.GrokBot"))',
         "setIconByPixmap",
+        "QPainter",
         "QSize(22, 22)",
+        "QSize(16, 16)",
+        "Qt::transparent",
+        "drawPixmap",
         "hicolor/24x24/apps/io.github.viniciosrab.GrokBot.png",
+        "hicolor/1024x1024/apps/io.github.viniciosrab.GrokBot.png",
+        "/app/grok-bot/resources/icon.png",
         "grokbot:",
         "sand:",
         "forwardProtocolUrls",
     ):
         if required not in companion_src:
             return False
+    # Opaque vendor assets must never be sent as tray pixmaps; only the
+    # generated rounded app-id icons are used.
+    if "apps/grok-bot.png" in companion_src:
+        return False
     if "killpg" not in companion_src and "setsid" not in companion_src:
         return False
     return True
@@ -305,9 +336,33 @@ class PayloadCheckHelperTests(unittest.TestCase):
         self.assertTrue(accepted)
         self.assertFalse(ostree_changed)
 
-    def test_redesigned_icon_path_rejects(self):
+    def test_missing_rounded_vendor_source_rejects(self):
         self.assertFalse(
-            check_vendor_icon("install resources/icon.png to /app/share/icons")
+            check_vendor_icon(
+                "ffmpeg /usr/bin/ffmpeg 16 24 32 48 64 128 256 512 "
+                "io.github.viniciosrab.GrokBot.png "
+                "usr/share/icons/hicolor/512x512/apps/grok-bot.png "
+                "usr/share/icons/hicolor"
+            )
+        )
+
+    def test_opaque_alias_rejects(self):
+        self.assertFalse(
+            check_vendor_icon(
+                "resources/icon.png usr/share/icons/hicolor/512x512/apps/grok-bot.png "
+                "usr/share/icons/hicolor ffmpeg /usr/bin/ffmpeg "
+                "16 24 32 48 64 128 256 512 "
+                "io.github.viniciosrab.GrokBot.png -name grok-bot.png"
+            )
+        )
+
+    def test_missing_ffmpeg_generation_rejects(self):
+        self.assertFalse(
+            check_vendor_icon(
+                "resources/icon.png usr/share/icons/hicolor/512x512/apps/grok-bot.png "
+                "usr/share/icons/hicolor io.github.viniciosrab.GrokBot.png "
+                "16 24 32 48 64 128 256 512"
+            )
         )
 
     def test_base_app_base_rejects(self):
@@ -477,6 +532,8 @@ class AtomicContentContractTests(unittest.TestCase):
         text = read_repo_text(VALIDATE_WORKFLOW_PATH)
         self.assertIn("python3 tools/test.py", text)
         self.assertIn("512x512/apps/grok-bot.png", text)
+        self.assertIn("512x512/apps/io.github.viniciosrab.GrokBot.png", text)
+        self.assertIn("1024x1024/apps/io.github.viniciosrab.GrokBot.png", text)
         self.assertIn(WATCHER_NAME, text)
         self.assertIn("grok-bot-companion", text)
         self.assertIn("launch", text.lower())

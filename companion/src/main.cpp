@@ -23,6 +23,7 @@
 #include <QFileInfo>
 #include <QIcon>
 #include <QLockFile>
+#include <QPainter>
 #include <QPixmap>
 #include <QProcess>
 #include <QSize>
@@ -238,31 +239,40 @@ int main(int argc, char **argv)
 
     KStatusNotifierItem tray(&app);
     tray.setTitle(QStringLiteral("Grok Bot (Unofficial)"));
-    // Flatpak exports only icons named after the app-id. Send a 22px
-    // pixmap, KDE's SmallMedium tray size, so Plasma cannot pick the
-    // 512px vendor asset and render a larger StatusNotifierItem.
+    // Flatpak exports only icons named after the app-id. Center the rounded
+    // vendor app-id icon on a transparent 22px canvas (KDE SmallMedium tray
+    // size) so the visible artwork keeps KDE-style padding instead of
+    // filling the whole square.
     tray.setIconByName(QStringLiteral("io.github.viniciosrab.GrokBot"));
     const QStringList pixmapCandidates = {
         QStringLiteral("/app/share/icons/hicolor/24x24/apps/io.github.viniciosrab.GrokBot.png"),
-        QStringLiteral("/app/share/icons/hicolor/24x24/apps/grok-bot.png"),
         QStringLiteral("/app/share/icons/hicolor/32x32/apps/io.github.viniciosrab.GrokBot.png"),
-        QStringLiteral("/app/share/icons/hicolor/32x32/apps/grok-bot.png"),
+        QStringLiteral("/app/share/icons/hicolor/1024x1024/apps/io.github.viniciosrab.GrokBot.png"),
+        QStringLiteral("/app/grok-bot/resources/icon.png"),
     };
-    QPixmap trayPixmap;
+    QPixmap traySource;
     for (const QString &path : pixmapCandidates) {
         if (QFileInfo::exists(path)) {
-            trayPixmap = QPixmap(path);
-            if (!trayPixmap.isNull()) {
+            traySource = QPixmap(path);
+            if (!traySource.isNull()) {
                 break;
             }
         }
     }
-    if (!trayPixmap.isNull()) {
-        const QPixmap traySized = trayPixmap.scaled(
-            QSize(22, 22),
+    if (!traySource.isNull()) {
+        const QPixmap trayArtwork = traySource.scaled(
+            QSize(16, 16),
             Qt::KeepAspectRatio,
             Qt::SmoothTransformation);
-        tray.setIconByPixmap(QIcon(traySized));
+        QPixmap trayCanvas(QSize(22, 22));
+        trayCanvas.fill(Qt::transparent);
+        QPainter trayPainter(&trayCanvas);
+        trayPainter.setRenderHint(QPainter::SmoothPixmapTransform);
+        const int trayX = (trayCanvas.width() - trayArtwork.width()) / 2;
+        const int trayY = (trayCanvas.height() - trayArtwork.height()) / 2;
+        trayPainter.drawPixmap(trayX, trayY, trayArtwork);
+        trayPainter.end();
+        tray.setIconByPixmap(QIcon(trayCanvas));
     }
     tray.setToolTipTitle(QStringLiteral("Grok Bot (Unofficial)"));
     tray.setStandardActionsEnabled(true);
