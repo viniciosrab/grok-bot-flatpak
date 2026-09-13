@@ -8,6 +8,12 @@ Covers the design threat matrix for the pin boundary:
   `commit -a`, hostile refspecs, missing tracking, non-origin pushes,
   composed feed arguments, missing `--head`, and missing secrets are
   rejected.
+* A same-version repin preserves the metainfo release date (no date
+  churn); only a genuinely new upstream version stamps the runner UTC date.
+* Automated approval targets only the exact pin PR after OPEN/head/base/
+  author identity checks, running as github.token while the App token keeps
+  branch push, PR creation, and auto-merge. Identity validation precedes
+  every mutation in both token contexts, and PR creation pins --base main.
 
 Pure helpers are unit-tested with hostile fixtures. Repo-content tests
 assert the real `data/pins.yml` and `.github/workflows/pin.yml` satisfy
@@ -33,6 +39,9 @@ ARTIFACT_HOST = "downloads.cursor.com"
 ALLOWED_PIN_PATHS = {"data/pins.yml", "io.github.viniciosrab.GrokBot.yml", "data/io.github.viniciosrab.GrokBot.metainfo.xml"}
 REQUIRED_PIN_SECRETS = ("APP_ID", "APP_PRIVATE_KEY")
 ALLOWED_PUSH_REMOTE = "origin"
+EXPECTED_PIN_AUTHOR = "grok-bot-pin[bot]"
+EXPECTED_PIN_BASE = "main"
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -254,6 +263,69 @@ def gh_pr_create_has_head(argv: list) -> bool:
     return bool(head) and not head.startswith("-")
 
 
+def gh_pr_merge_is_exact_auto_squash(argv: list) -> bool:
+    """Accept only `gh pr merge --auto --squash \"${PR_NUMBER}\"` (exact PR).
+
+    The merge must target the captured PR number variable, never a branch
+    name, and must request auto-merge (never an immediate merge that would
+    bypass the required PR checks gating the merge).
+    """
+    tokens = strip_env_prefix(argv)
+    if tokens and tokens[0] == "gh":
+        tokens = tokens[1:]
+    if "pr" not in tokens or "merge" not in tokens:
+        return False
+    if tokens.index("merge") < tokens.index("pr"):
+        return False
+    if "--auto" not in tokens:
+        return False
+    if "--squash" not in tokens:
+        return False
+    merge_index = tokens.index("merge")
+    tail = tokens[merge_index + 1:]
+    targets = [token for token in tail if not token.startswith("-")]
+    return targets == ["${PR_NUMBER}"]
+
+
+def metainfo_release_entry(pinned_version, existing_version, existing_date, today):
+    """Return the metainfo `<release .../>` entry for a pin run.
+
+    A same-version repin preserves the existing release date (no date
+    churn); only a genuinely new upstream version stamps the current UTC
+    date. Returns None on any invalid input so callers fail closed.
+    """
+    if not VERSION_RE.match(str(pinned_version or "")):
+        return None
+    if not VERSION_RE.match(str(existing_version or "")):
+        return None
+    if not DATE_RE.match(str(existing_date or "")):
+        return None
+    if not DATE_RE.match(str(today or "")):
+        return None
+    if existing_version == pinned_version:
+        return '<release version="%s" date="%s"/>' % (pinned_version, existing_date)
+    return '<release version="%s" date="%s"/>' % (pinned_version, today)
+
+
+def pin_pr_identity_is_valid(number, state, head, base, author, expected_head):
+    """Accept only the exact pin PR after full identity checks.
+
+    The number must be a positive all-digit PR number, the state must be
+    OPEN, the head ref must equal the expected pin branch, the base ref
+    must be main, and the author must be the pin App bot. Anything else
+    fails closed so approval can never land on a foreign PR.
+    """
+    if not isinstance(number, str) or not number.isdigit() or int(number) <= 0:
+        return False
+    if state != "OPEN":
+        return False
+    if not expected_head or head != expected_head:
+        return False
+    if base != EXPECTED_PIN_BASE:
+        return False
+    return author == EXPECTED_PIN_AUTHOR
+
+
 def porcelain_shows_only_allowed(output: str, allowed: set = ALLOWED_PIN_PATHS) -> bool:
     """Check `git status --porcelain` lists only allowed paths."""
     seen = set()
@@ -318,6 +390,15 @@ def run_block_is_shell_safe(block: str) -> bool:
 def read_text(path: str) -> str:
     with open(path, "r", encoding="utf-8") as handle:
         return handle.read()
+
+
+def workflow_step_containing(text: str, marker: str) -> str:
+    """Return the `- name:` step block containing marker, or "" when absent."""
+    steps = re.split(r"\n(?=      - name: )", text)
+    for step in steps:
+        if marker in step:
+            return step
+    return ""
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +581,91 @@ class GitSafetyHelperTests(unittest.TestCase):
         self.assertFalse(gh_pr_create_has_head(["gh", "pr", "create", "--title", "t"]))
         self.assertFalse(gh_pr_create_has_head(["gh", "pr", "create", "--head"]))
 
+    def test_pr_merge_requires_exact_auto_squash_target(self):
+        self.assertTrue(
+            gh_pr_merge_is_exact_auto_squash(
+                ["gh", "pr", "merge", "--auto", "--squash", "${PR_NUMBER}"]
+            )
+        )
+        self.assertTrue(
+            gh_pr_merge_is_exact_auto_squash(
+                ["GH_TOKEN=x", "gh", "pr", "merge", "--auto", "--squash", "${PR_NUMBER}"]
+            )
+        )
+        # Immediate merge without --auto would bypass required PR checks before merge.
+        self.assertFalse(
+            gh_pr_merge_is_exact_auto_squash(
+                ["gh", "pr", "merge", "--squash", "${PR_NUMBER}"]
+            )
+        )
+        # Ambiguous branch targeting is rejected; only the exact PR number counts.
+        self.assertFalse(
+            gh_pr_merge_is_exact_auto_squash(
+                ["gh", "pr", "merge", "--auto", "--squash", "${PIN_BRANCH}"]
+            )
+        )
+        self.assertFalse(
+            gh_pr_merge_is_exact_auto_squash(
+                ["gh", "pr", "merge", "--auto", "--squash", "pin/sand-0.47.0"]
+            )
+        )
+        # A non-squash merge method is rejected for pin PRs.
+        self.assertFalse(
+            gh_pr_merge_is_exact_auto_squash(
+                ["gh", "pr", "merge", "--auto", "--merge", "${PR_NUMBER}"]
+            )
+        )
+        self.assertFalse(
+            gh_pr_merge_is_exact_auto_squash(["gh", "pr", "merge", "--auto", "--squash"])
+        )
+
+    def test_pin_pr_identity_checks_reject_foreign_prs(self):
+        good = ("42", "OPEN", "pin/sand-0.47.0", "main", "grok-bot-pin[bot]")
+        self.assertTrue(pin_pr_identity_is_valid(*good, "pin/sand-0.47.0"))
+        # Non-positive or non-numeric numbers never identify a PR.
+        for bad_number in ("", "0", "-3", "4.2", "12a", None, 42):
+            bad = (bad_number, "OPEN", "pin/sand-0.47.0", "main", "grok-bot-pin[bot]")
+            self.assertFalse(pin_pr_identity_is_valid(*bad, "pin/sand-0.47.0"), bad_number)
+        # Only OPEN PRs may be approved.
+        for state in ("CLOSED", "MERGED", "", None):
+            bad = ("42", state, "pin/sand-0.47.0", "main", "grok-bot-pin[bot]")
+            self.assertFalse(pin_pr_identity_is_valid(*bad, "pin/sand-0.47.0"), state)
+        # Head must equal the expected pin branch, base must be main.
+        bad = ("42", "OPEN", "pin/sand-0.48.0", "main", "grok-bot-pin[bot]")
+        self.assertFalse(pin_pr_identity_is_valid(*bad, "pin/sand-0.47.0"))
+        bad = ("42", "OPEN", "main", "main", "grok-bot-pin[bot]")
+        self.assertFalse(pin_pr_identity_is_valid(*bad, "pin/sand-0.47.0"))
+        bad = ("42", "OPEN", "pin/sand-0.47.0", "pin/sand-0.47.0", "grok-bot-pin[bot]")
+        self.assertFalse(pin_pr_identity_is_valid(*bad, "pin/sand-0.47.0"))
+        self.assertFalse(
+            pin_pr_identity_is_valid("42", "OPEN", "pin/sand-0.47.0", "main", "grok-bot-pin[bot]", "")
+        )
+        # Only the pin App bot may author an approvable pin PR.
+        for author in ("octocat", "github-actions[bot]", "dependabot[bot]", "", None):
+            bad = ("42", "OPEN", "pin/sand-0.47.0", "main", author)
+            self.assertFalse(pin_pr_identity_is_valid(*bad, "pin/sand-0.47.0"), author)
+
+    def test_metainfo_release_date_preserved_on_same_version(self):
+        self.assertEqual(
+            metainfo_release_entry("0.47.0", "0.47.0", "2026-09-01", "2026-09-13"),
+            '<release version="0.47.0" date="2026-09-01"/>',
+        )
+
+    def test_metainfo_release_date_stamped_on_new_version(self):
+        self.assertEqual(
+            metainfo_release_entry("0.48.0", "0.47.0", "2026-09-01", "2026-09-13"),
+            '<release version="0.48.0" date="2026-09-13"/>',
+        )
+
+    def test_metainfo_release_entry_rejects_invalid_inputs(self):
+        self.assertIsNone(metainfo_release_entry("", "0.47.0", "2026-09-01", "2026-09-13"))
+        self.assertIsNone(metainfo_release_entry("bogus", "0.47.0", "2026-09-01", "2026-09-13"))
+        self.assertIsNone(metainfo_release_entry("0.48.0", "bogus", "2026-09-01", "2026-09-13"))
+        self.assertIsNone(metainfo_release_entry("0.48.0", "0.47.0", "today", "2026-09-13"))
+        self.assertIsNone(metainfo_release_entry("0.48.0", "0.47.0", "2026-09-01", "13-09-2026"))
+        self.assertIsNone(metainfo_release_entry(None, "0.47.0", "2026-09-01", "2026-09-13"))
+        self.assertIsNone(metainfo_release_entry("0.48.0", None, "2026-09-01", "2026-09-13"))
+
     def test_porcelain_allows_only_pins(self):
         self.assertTrue(porcelain_shows_only_allowed(" M data/pins.yml\n", {"data/pins.yml"}))
         self.assertTrue(porcelain_shows_only_allowed("", {"data/pins.yml"}))
@@ -673,6 +839,190 @@ class PinWorkflowContractTests(unittest.TestCase):
         text = read_text(PIN_WORKFLOW_PATH)
         self.assertIn("gh pr create", text)
         self.assertIn("--head", text)
+
+    def test_pin_polls_every_six_hours(self):
+        text = read_text(PIN_WORKFLOW_PATH)
+        self.assertIn('cron: "0 */6 * * *"', text)
+        self.assertNotIn('cron: "0 6 * * *"', text)
+
+    def test_pin_enables_squash_auto_merge_on_exact_pr(self):
+        text = read_text(PIN_WORKFLOW_PATH)
+        self.assertIn("gh pr merge --auto --squash", text)
+        self.assertIn('"${PR_NUMBER}"', text)
+        self.assertIn("--json number", text)
+        merge_lines = [
+            line.strip()
+            for line in text.splitlines()
+            if re.search(r"\bgh\s+pr\s+merge\b", line)
+        ]
+        self.assertTrue(merge_lines, "pin.yml must enable auto-merge on the pin PR")
+        for line in merge_lines:
+            self.assertIn("--auto", line)
+            self.assertIn("--squash", line)
+            self.assertIn('"${PR_NUMBER}"', line)
+            self.assertNotIn("PIN_BRANCH", line)
+            self.assertNotIn("pin/sand-", line)
+
+    def test_pin_never_pushes_or_merges_main_directly(self):
+        text = read_text(PIN_WORKFLOW_PATH)
+        self.assertNotIn("push origin main", text)
+        self.assertNotIn("refs/heads/main", text)
+        self.assertNotIn("git push origin --", text)
+        for line in text.splitlines():
+            stripped = line.strip()
+            if re.search(r"\bgh\s+pr\s+merge\b", stripped):
+                self.assertIn("--auto", stripped)
+                self.assertIn('"${PR_NUMBER}"', stripped)
+
+    def test_pin_auto_merge_fails_closed_without_exact_pr(self):
+        text = read_text(PIN_WORKFLOW_PATH)
+        self.assertIn("cannot establish the exact pin PR", text)
+        self.assertIn("refusing to enable auto-merge", text)
+        self.assertIn("failed to enable auto-merge for the exact pin PR", text)
+        self.assertIn("failing closed", text)
+        self.assertIn("exit 1", text)
+
+    def test_pin_preserves_release_date_on_same_version_repin(self):
+        text = read_text(PIN_WORKFLOW_PATH)
+        self.assertIn("existing_version", text)
+        self.assertIn("existing_date", text)
+        self.assertIn("existing_version == pinned_version", text)
+        self.assertIn("no date churn", text)
+        self.assertIn("metainfo release date is malformed", text)
+
+    def test_pin_grants_least_pull_request_permission_at_job_scope(self):
+        text = read_text(PIN_WORKFLOW_PATH)
+        self.assertEqual(text.count("pull-requests: write"), 1)
+        head, _, _ = text.partition("\njobs:")
+        self.assertTrue(head, "pin.yml must keep a top-level permissions block")
+        self.assertNotIn("pull-requests", head)
+
+    def test_pin_approval_uses_default_token_not_app_token(self):
+        text = read_text(PIN_WORKFLOW_PATH)
+        approval = workflow_step_containing(text, "gh pr review --approve")
+        self.assertTrue(approval, "pin.yml must have an exact-PR approval step")
+        self.assertIn("github.token", approval)
+        self.assertNotIn("app-token", approval)
+        # The App token stays on branch push, PR creation, and auto-merge only.
+        self.assertEqual(text.count("steps.app-token.outputs.token"), 2)
+
+    def test_pin_approval_validates_exact_pr_identity(self):
+        text = read_text(PIN_WORKFLOW_PATH)
+        approval = workflow_step_containing(text, "gh pr review --approve")
+        self.assertTrue(approval, "pin.yml must have an exact-PR approval step")
+        self.assertIn("--json reviewDecision", approval)
+        self.assertIn("--json state", approval)
+        self.assertIn("--json headRefName", approval)
+        self.assertIn("--json baseRefName", approval)
+        self.assertIn("--json author", approval)
+        self.assertIn("OPEN", approval)
+        self.assertIn("pin/sand-${PIN_VERSION}", approval)
+        self.assertIn('"main"', approval)
+        self.assertIn("grok-bot-pin[bot]", approval)
+        self.assertIn("app/grok-bot-pin", approval)
+        self.assertIn("refusing to approve", approval)
+        self.assertIn("failed to approve the exact pin PR", approval)
+        self.assertIn("exit 1", approval)
+        review_lines = [
+            line.strip()
+            for line in approval.splitlines()
+            if re.search(r"\bgh\s+pr\s+review\b", line)
+        ]
+        self.assertTrue(review_lines, "approval must run gh pr review")
+        for line in review_lines:
+            self.assertIn("--approve", line)
+            self.assertIn('"${PR_NUMBER}"', line)
+            self.assertNotIn("PIN_BRANCH", line)
+            self.assertNotIn("pin/sand-", line)
+
+    def test_pin_pr_mutations_target_only_the_captured_number(self):
+        text = read_text(PIN_WORKFLOW_PATH)
+        mutation_lines = [
+            line.strip()
+            for line in text.splitlines()
+            if re.search(r"\bgh\s+pr\s+(merge|review)\b", line)
+        ]
+        self.assertTrue(mutation_lines, "pin.yml must mutate PRs only via merge/review")
+        for line in mutation_lines:
+            self.assertIn('"${PR_NUMBER}"', line)
+            self.assertNotIn("PIN_BRANCH", line)
+            self.assertNotIn("pin/sand-", line)
+
+    def test_pin_pr_create_targets_main_explicitly(self):
+        text = read_text(PIN_WORKFLOW_PATH)
+        create_step = workflow_step_containing(text, "gh pr create")
+        self.assertTrue(create_step, "pin.yml must create the pin PR")
+        create_idx = create_step.index("gh pr create")
+        base_idx = create_step.index("--base main")
+        self.assertGreater(
+            base_idx, create_idx, "gh pr create must pin --base main explicitly"
+        )
+
+    def test_pin_merge_validates_identity_before_mutation(self):
+        text = read_text(PIN_WORKFLOW_PATH)
+        merge_step = workflow_step_containing(text, "gh pr merge --auto")
+        self.assertTrue(merge_step, "pin.yml must enable auto-merge on the pin PR")
+        ordered = [
+            "cannot establish the exact pin PR; refusing to enable auto-merge",
+            "invalid pin PR number; refusing to enable auto-merge",
+            "--json state",
+            "--json headRefName",
+            "--json baseRefName",
+            "--json author",
+            "is not OPEN; refusing to enable auto-merge",
+            "is not the expected pin branch; refusing to enable auto-merge",
+            "base is not main; refusing to enable auto-merge",
+            "is not the expected pin app; refusing to enable auto-merge",
+            "gh pr merge --auto",
+        ]
+        indices = [merge_step.index(marker) for marker in ordered]
+        self.assertEqual(
+            indices,
+            sorted(indices),
+            "number checks, then identity validation, then auto-merge, in that order",
+        )
+
+    def test_pin_merge_and_approval_share_identity_requirements(self):
+        text = read_text(PIN_WORKFLOW_PATH)
+        merge_step = workflow_step_containing(text, "gh pr merge --auto")
+        approval = workflow_step_containing(text, "gh pr review --approve")
+        required = (
+            "--json state",
+            "--json headRefName",
+            "--json baseRefName",
+            "--json author",
+            '"main"',
+            "grok-bot-pin[bot]",
+            "app/grok-bot-pin",
+            "pin/sand-${PIN_VERSION}",
+            "OPEN",
+        )
+        for marker in required:
+            self.assertIn(marker, merge_step, f"merge step must check {marker}")
+            self.assertIn(marker, approval, f"approval step must check {marker}")
+
+    def test_pin_approval_noop_follows_identity_validation(self):
+        text = read_text(PIN_WORKFLOW_PATH)
+        approval = workflow_step_containing(text, "gh pr review --approve")
+        self.assertTrue(approval, "pin.yml must have an exact-PR approval step")
+        queries = ("--json state", "--json headRefName", "--json baseRefName", "--json author")
+        refusals = (
+            "is not OPEN; refusing to approve",
+            "is not the expected pin branch; refusing to approve",
+            "base is not main; refusing to approve",
+            "is not the expected pin app; refusing to approve",
+        )
+        noop_idx = approval.index('= "APPROVED"')
+        approve_idx = approval.index("gh pr review --approve")
+        for marker in queries + refusals:
+            self.assertLess(
+                approval.index(marker),
+                noop_idx,
+                f"identity check must precede the APPROVED no-op: {marker}",
+            )
+        self.assertLess(
+            noop_idx, approve_idx, "the APPROVED no-op must precede the approval mutation"
+        )
 
     def test_run_blocks_have_no_composed_feed_args(self):
         text = read_text(PIN_WORKFLOW_PATH)

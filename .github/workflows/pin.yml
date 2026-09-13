@@ -2,6 +2,17 @@
 # a pin branch PR updating data/pins.yml, io.github.viniciosrab.GrokBot.yml
 # and data/io.github.viniciosrab.GrokBot.metainfo.xml.
 #
+# The job polls every six hours, refreshes the pin/sand-${VERSION} branch,
+# opens the exact pin PR when needed, approves that exact PR with the
+# default github.token identity, and enables squash auto-merge with the
+# App token, so required PR checks (including the one-approval ruleset)
+# gate the merge; after the merge, the main-branch validate -> X3 -> publish
+# chain gates the release. Only a genuinely new upstream version stamps a
+# new metainfo release date; a same-version repin preserves the existing
+# release date. Every approval and auto-merge setup step fails closed when
+# the exact PR identity cannot be established. Nothing ever pushes
+# directly to main.
+#
 # Feed identity is closed: only the two sand feeds below are queried. No
 # vendor landing page is ever scraped for release detection.
 # code: they travel through environment variables and files, always quoted.
@@ -15,7 +26,7 @@ name: pin
 
 on:
   schedule:
-    - cron: "0 6 * * *"
+    - cron: "0 */6 * * *"
   workflow_dispatch: {}
 
 permissions:
@@ -35,6 +46,7 @@ jobs:
     timeout-minutes: 30
     permissions:
       contents: read
+      pull-requests: write
     steps:
       - name: Check out the repository
         uses: actions/checkout@v4
@@ -167,15 +179,36 @@ jobs:
           with open(os.path.join(workspace, "data", "pins.yml"), "w") as handle:
               handle.write(pins)
 
-          # N4: keep the metainfo release entry equal to the pinned version
-          # with the runner UTC date, single entry replaced in place.
+          # N4: keep the metainfo release entry equal to the pinned version.
+          # Only a genuinely new upstream version stamps the current UTC
+          # date; a same-version repin (checksum/commit change) preserves
+          # the existing release date so scheduled runs cause no date churn.
           metainfo_path = os.path.join(
               workspace, "data", "io.github.viniciosrab.GrokBot.metainfo.xml"
           )
           with open(metainfo_path) as handle:
               metainfo_text = handle.read()
-          today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
-          new_release = '<release version="%s" date="%s"/>' % (read("version"), today)
+          existing = re.search(
+              r'<release\s+version="([^"]*)"\s+date="([^"]*)"\s*/>',
+              metainfo_text,
+          )
+          if not existing:
+              raise SystemExit("metainfo release entry not found")
+          existing_version, existing_date = existing.group(1), existing.group(2)
+          if not re.match(r"^\d{4}-\d{2}-\d{2}$", existing_date):
+              raise SystemExit("metainfo release date is malformed")
+          pinned_version = read("version")
+          if existing_version == pinned_version:
+              new_release = '<release version="%s" date="%s"/>' % (
+                  pinned_version,
+                  existing_date,
+              )
+          else:
+              today = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+              new_release = '<release version="%s" date="%s"/>' % (
+                  pinned_version,
+                  today,
+              )
           updated, count = re.subn(
               r'<release\s+version="[^"]*"\s+date="[^"]*"\s*/>',
               new_release,
@@ -260,7 +293,7 @@ jobs:
           git commit -m "chore(pin): sand ${PIN_VERSION}" -- data/pins.yml io.github.viniciosrab.GrokBot.yml data/io.github.viniciosrab.GrokBot.metainfo.xml
           git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 -w0)" push --force-with-lease origin "${PIN_BRANCH}"
 
-      - name: Open the pin branch PR
+      - name: Open the pin branch PR and enable auto-merge
         if: ${{ steps.write.outputs.changed == 'true' }}
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -268,11 +301,145 @@ jobs:
           set -euo pipefail
           PIN_BRANCH="$(cat "${RUNNER_TEMP}/pin/branch")"
           PIN_VERSION="$(cat "${RUNNER_TEMP}/pin/version")"
+          case "${PIN_BRANCH}" in
+            pin/sand-*) ;;
+            *)
+              echo "refusing to enable auto-merge on an unexpected branch" >&2
+              exit 1
+              ;;
+          esac
+          case "${PIN_VERSION}" in
+            ""|*[^0-9.]*|*..*)
+              echo "invalid pinned version; refusing to enable auto-merge" >&2
+              exit 1
+              ;;
+          esac
           printf 'Pin Stable Upstream Release %s.\n' "${PIN_VERSION}" > "${RUNNER_TEMP}/pin/body.md"
           if gh pr view "${PIN_BRANCH}" >/dev/null 2>&1; then
             echo "PR already exists for ${PIN_BRANCH}; skipping create"
           else
             gh pr create --head "${PIN_BRANCH}" \
+              --base main \
               --title "chore(pin): sand ${PIN_VERSION}" \
               --body-file "${RUNNER_TEMP}/pin/body.md"
           fi
+          PR_NUMBER="$(gh pr view "${PIN_BRANCH}" --json number --jq .number)"
+          if [ -z "${PR_NUMBER}" ]; then
+            echo "cannot establish the exact pin PR; refusing to enable auto-merge" >&2
+            exit 1
+          fi
+          case "${PR_NUMBER}" in
+            *[!0-9]*)
+              echo "invalid pin PR number; refusing to enable auto-merge" >&2
+              exit 1
+              ;;
+          esac
+          if [ "${PR_NUMBER}" -le 0 ]; then
+            echo "invalid pin PR number; refusing to enable auto-merge" >&2
+            exit 1
+          fi
+          # No auto-merge until the exact PR identity is fully validated: a
+          # foreign or stale PR on a pin/sand-* branch must never receive it,
+          # and a later failure would not undo that mutation.
+          PR_STATE="$(gh pr view "${PR_NUMBER}" --json state --jq .state)"
+          PR_HEAD="$(gh pr view "${PR_NUMBER}" --json headRefName --jq .headRefName)"
+          PR_BASE="$(gh pr view "${PR_NUMBER}" --json baseRefName --jq .baseRefName)"
+          PR_AUTHOR="$(gh pr view "${PR_NUMBER}" --json author --jq .author.login)"
+          if [ "${PR_STATE}" != "OPEN" ]; then
+            echo "pin PR #${PR_NUMBER} is not OPEN; refusing to enable auto-merge" >&2
+            exit 1
+          fi
+          EXPECTED_HEAD="pin/sand-${PIN_VERSION}"
+          if [ "${PR_HEAD}" != "${PIN_BRANCH}" ] || [ "${PR_HEAD}" != "${EXPECTED_HEAD}" ]; then
+            echo "pin PR head is not the expected pin branch; refusing to enable auto-merge" >&2
+            exit 1
+          fi
+          if [ "${PR_BASE}" != "main" ]; then
+            echo "pin PR base is not main; refusing to enable auto-merge" >&2
+            exit 1
+          fi
+          # The PR author must be the pin GitHub App (app/grok-bot-pin),
+          # whose bot login is grok-bot-pin[bot]; never auto-merge a foreign PR.
+          if [ "${PR_AUTHOR}" != "grok-bot-pin[bot]" ]; then
+            echo "pin PR author is not the expected pin app; refusing to enable auto-merge" >&2
+            exit 1
+          fi
+          if ! gh pr merge --auto --squash "${PR_NUMBER}"; then
+            echo "failed to enable auto-merge for the exact pin PR; failing closed" >&2
+            exit 1
+          fi
+          echo "auto-merge enabled for pin PR #${PR_NUMBER} (${PIN_BRANCH})"
+
+      - name: Approve the exact pin PR for the one-approval ruleset
+        if: ${{ steps.write.outputs.changed == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Scheduled runs execute from the default branch, so this approval
+          # reviews trusted default-branch bytes and runs as the default
+          # github.token identity, distinct from the App PR author. The
+          # repository permits Actions to approve PRs; required status
+          # checks still gate the merge.
+          PIN_BRANCH="$(cat "${RUNNER_TEMP}/pin/branch")"
+          PIN_VERSION="$(cat "${RUNNER_TEMP}/pin/version")"
+          case "${PIN_BRANCH}" in
+            pin/sand-*) ;;
+            *)
+              echo "refusing to approve an unexpected branch" >&2
+              exit 1
+              ;;
+          esac
+          case "${PIN_VERSION}" in
+            ""|*[^0-9.]*|*..*)
+              echo "invalid pinned version; refusing to approve" >&2
+              exit 1
+              ;;
+          esac
+          PR_NUMBER="$(gh pr view "${PIN_BRANCH}" --json number --jq .number)"
+          case "${PR_NUMBER}" in
+            ""|*[!0-9]*)
+              echo "cannot establish the exact pin PR; refusing to approve" >&2
+              exit 1
+              ;;
+          esac
+          if [ "${PR_NUMBER}" -le 0 ]; then
+            echo "invalid pin PR number; refusing to approve" >&2
+            exit 1
+          fi
+          PR_STATE="$(gh pr view "${PR_NUMBER}" --json state --jq .state)"
+          PR_HEAD="$(gh pr view "${PR_NUMBER}" --json headRefName --jq .headRefName)"
+          PR_BASE="$(gh pr view "${PR_NUMBER}" --json baseRefName --jq .baseRefName)"
+          PR_AUTHOR="$(gh pr view "${PR_NUMBER}" --json author --jq .author.login)"
+          if [ "${PR_STATE}" != "OPEN" ]; then
+            echo "pin PR #${PR_NUMBER} is not OPEN; refusing to approve" >&2
+            exit 1
+          fi
+          EXPECTED_HEAD="pin/sand-${PIN_VERSION}"
+          if [ "${PR_HEAD}" != "${PIN_BRANCH}" ] || [ "${PR_HEAD}" != "${EXPECTED_HEAD}" ]; then
+            echo "pin PR head is not the expected pin branch; refusing to approve" >&2
+            exit 1
+          fi
+          if [ "${PR_BASE}" != "main" ]; then
+            echo "pin PR base is not main; refusing to approve" >&2
+            exit 1
+          fi
+          # The PR author must be the pin GitHub App (app/grok-bot-pin),
+          # whose bot login is grok-bot-pin[bot]; never approve a foreign PR.
+          if [ "${PR_AUTHOR}" != "grok-bot-pin[bot]" ]; then
+            echo "pin PR author is not the expected pin app; refusing to approve" >&2
+            exit 1
+          fi
+          # The rerun no-op below runs only after full identity validation,
+          # so a foreign or stale (but already approved) PR fails closed
+          # above instead of exiting success silently.
+          DECISION="$(gh pr view "${PR_NUMBER}" --json reviewDecision --jq .reviewDecision)"
+          if [ "${DECISION}" = "APPROVED" ]; then
+            echo "pin PR #${PR_NUMBER} is already approved; skipping approval (rerun safe)"
+            exit 0
+          fi
+          if ! gh pr review --approve "${PR_NUMBER}"; then
+            echo "failed to approve the exact pin PR; failing closed" >&2
+            exit 1
+          fi
+          echo "approved pin PR #${PR_NUMBER} (${PIN_BRANCH})"
