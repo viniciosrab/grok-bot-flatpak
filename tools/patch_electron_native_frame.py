@@ -56,9 +56,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import struct
 import sys
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 
 NATIVE_FRAME_FIND = b'{frame:!1,titleBarStyle:"default"}'
 NATIVE_FRAME_REPLACE = b'{frame:!0,titleBarStyle:"default"}'
@@ -157,6 +158,313 @@ class TransformError(RuntimeError):
     """The expected upstream ASAR pattern is missing or ambiguous."""
 
 
+_MINIFIED_IDENTIFIER = rb"[A-Za-z_$][A-Za-z0-9_$]*"
+
+
+class StructuralPatch:
+    """A minifier-tolerant patch over one verified JavaScript shape."""
+
+    __slots__ = ("name", "pattern", "replacement")
+
+    def __init__(
+        self,
+        name: str,
+        pattern: re.Pattern,
+        replacement: Callable[[re.Match], bytes],
+    ) -> None:
+        self.name = name
+        self.pattern = pattern
+        self.replacement = replacement
+
+
+class NativePatchRule:
+    """An exact legacy patch with an optional structural fallback."""
+
+    __slots__ = (
+        "name",
+        "find",
+        "replace",
+        "structural",
+        "extension",
+        "path_prefix",
+    )
+
+    def __init__(
+        self,
+        name: str,
+        find: bytes,
+        replace: bytes,
+        structural: StructuralPatch | None = None,
+        extension: bool = False,
+        path_prefix: str | None = None,
+    ) -> None:
+        self.name = name
+        self.find = find
+        self.replace = replace
+        self.structural = structural
+        self.extension = extension
+        self.path_prefix = path_prefix
+
+
+PatchCandidate = tuple[str, int, int, re.Match[bytes] | None]
+
+
+_CONTROLS_STRUCTURAL = StructuralPatch(
+    "Linux in-content controls",
+    re.compile(
+        rb'if\((?P<platform>'
+        + _MINIFIED_IDENTIFIER
+        + rb')==="darwin"\)return null;'
+        rb'if\((?P=platform)==="win32"\)\{[\s\S]{0,1600}?\}'
+        rb'if\((?P<hidden>'
+        + _MINIFIED_IDENTIFIER
+        + rb')\)return null;let '
+        + _MINIFIED_IDENTIFIER
+        + rb','
+        + _MINIFIED_IDENTIFIER
+        + rb','
+        + _MINIFIED_IDENTIFIER
+        + rb','
+        + _MINIFIED_IDENTIFIER
+        + rb','
+        + _MINIFIED_IDENTIFIER
+        + rb';if\((?P<state>'
+        + _MINIFIED_IDENTIFIER
+        + rb')\[15\]!=='
+        + _MINIFIED_IDENTIFIER
+        + rb'\)'
+    ),
+    lambda match: match.group(0).replace(
+        b"if(" + match.group("hidden") + b")return null",
+        b"if(1)return null",
+        1,
+    ),
+)
+
+
+_CLOSE_STRUCTURAL = StructuralPatch(
+    "close-to-hide lifecycle",
+    re.compile(
+        rb'(?P<anchor>(?P<window>'
+        + _MINIFIED_IDENTIFIER
+        + rb')\.on\("closed",\(\)=>\{(?P<activation>'
+        + _MINIFIED_IDENTIFIER
+        + rb')\.markRendererNotReady\(\)\}\))'
+        rb'(?P<suffix>;let '
+        + _MINIFIED_IDENTIFIER
+        + rb'=(?P<factory>'
+        + _MINIFIED_IDENTIFIER
+        + rb')\(\{window:(?P<window_factory>'
+        + _MINIFIED_IDENTIFIER
+        + rb')\((?P=window)\),app:\{onceBeforeQuit:(?P<callback>'
+        + _MINIFIED_IDENTIFIER
+        + rb')=>(?P<app>'
+        + _MINIFIED_IDENTIFIER
+        + rb')\.app\.once\("before-quit",(?P=callback)\)\}\}\))'
+    ),
+    lambda match: match.group("anchor")
+    + b','
+    + match.group("window")
+    + b'.on("close",e=>{'
+    + match.group("app")
+    + b'.app.quitting||(e.preventDefault(),'
+    + match.group("window")
+    + b'.hide())})'
+    + match.group("suffix"),
+)
+
+
+_QUIT_ARM_STRUCTURAL = StructuralPatch(
+    "window-all-closed quit arming",
+    re.compile(
+        rb'(?P<app>'
+        + _MINIFIED_IDENTIFIER
+        + rb')\.app\.on\("window-all-closed",\(\)=>\{process\.platform!=="darwin"'
+        rb'&&(?P=app)\.app\.quit\(\)\}\)'
+    ),
+    lambda match: match.group("app")
+    + b'.app.once("before-quit",()=>{'
+    + match.group("app")
+    + b'.app.quitting=!0}),'
+    + match.group(0),
+)
+
+
+_SECOND_INSTANCE_STRUCTURAL = StructuralPatch(
+    "second-instance reveal",
+    re.compile(
+        rb'(?P<handler>'
+        + _MINIFIED_IDENTIFIER
+        + rb')=\((?P<first>'
+        + _MINIFIED_IDENTIFIER
+        + rb'),(?P<second>'
+        + _MINIFIED_IDENTIFIER
+        + rb')\)=>\{let (?P<list>'
+        + _MINIFIED_IDENTIFIER
+        + rb')=(?P<parser>'
+        + _MINIFIED_IDENTIFIER
+        + rb')\((?P<source>'
+        + _MINIFIED_IDENTIFIER
+        + rb'),(?P<input>'
+        + _MINIFIED_IDENTIFIER
+        + rb')\);if\((?P=list)\.length===0\)\{(?P<target>'
+        + _MINIFIED_IDENTIFIER
+        + rb')\.focus\(\);return\}for\(let (?P<item>'
+        + _MINIFIED_IDENTIFIER
+        + rb') of (?P=list)\)(?P<dispatcher>'
+        + _MINIFIED_IDENTIFIER
+        + rb')\.handleCandidate\((?P=item),"second-instance"\)\}'
+    ),
+    lambda match: match.group("handler")
+    + b"=("
+    + match.group("first")
+    + b","
+    + match.group("second")
+    + b")=>{let "
+    + match.group("list")
+    + b"="
+    + match.group("parser")
+    + b"("
+    + match.group("source") + b"," + match.group("input")
+    + b");"
+    + match.group("target")
+    + b".focus();if("
+    + match.group("list")
+    + b".length!==0)for(let "
+    + match.group("item")
+    + b" of "
+    + match.group("list")
+    + b")"
+    + match.group("dispatcher")
+    + b'.handleCandidate('
+    + match.group("item")
+    + b',"second-instance")};;;;;;;;',
+)
+
+
+_MENU_HIDE_STRUCTURAL = StructuralPatch(
+    "BrowserWindow menu hiding",
+    re.compile(
+        rb'(?P<window>'
+        + _MINIFIED_IDENTIFIER
+        + rb')=new (?P<electron>'
+        + _MINIFIED_IDENTIFIER
+        + rb')\.BrowserWindow\(\{\.\.\.(?P<options>'
+        + _MINIFIED_IDENTIFIER
+        + rb')\.windowOptions,'
+    ),
+    lambda match: match.group(0) + b"autoHideMenuBar:!0,",
+)
+
+
+_SIGTERM_STRUCTURAL = StructuralPatch(
+    "single-instance graceful SIGTERM bridge",
+    re.compile(
+        rb'(?P<decl>var|let|const)[ \t]+(?P<lock>'
+        + _MINIFIED_IDENTIFIER
+        + rb')=!?(?P<app>'
+        + _MINIFIED_IDENTIFIER
+        + rb')\.app\.isPackaged\|\|(?P=app)\.app\.requestSingleInstanceLock\(\);'
+        rb'(?P=lock)\|\|(?P=app)\.app\.quit\(\);'
+    ),
+    lambda match: match.group(0).replace(
+        match.group("lock")
+        + b"||"
+        + match.group("app")
+        + b".app.quit();",
+        match.group("lock")
+        + b"||"
+        + match.group("app")
+        + b'.app.quit();process.on("SIGTERM",()=>{'
+        + match.group("app")
+        + b'.app.quit()});',
+        1,
+    ),
+)
+
+
+# The verified restart guard has one nested block. Keeping that block balanced
+# while excluding unmatched braces prevents this rule from crossing the
+# relaunchDesktop function's closing brace into a neighboring property.
+_RELAUNCH_STRUCTURAL = StructuralPatch(
+    "hardware-acceleration relaunch",
+    re.compile(
+        rb'relaunchDesktop:\(\)=>\{(?=[^{}]{0,800}restartExitCode)'
+        rb'(?P<body>(?:[^{}]|\{[^{}]*\}){0,800}?)(?P<app>'
+        + _MINIFIED_IDENTIFIER
+        + rb')\.app\.relaunch\(\),(?P=app)\.app\.quit\(\)'
+    ),
+    lambda match: match.group(0).replace(
+        match.group("app") + b".app.relaunch()," + match.group("app") + b".app.quit()",
+        match.group("app") + b".app.relaunch()," + match.group("app") + b".app.exit()",
+        1,
+    ),
+)
+
+
+NATIVE_PATCH_RULES = (
+    NativePatchRule(
+        "native Linux frame",
+        NATIVE_FRAME_FIND,
+        NATIVE_FRAME_REPLACE,
+        path_prefix="dist/electron-main/main-core.cjs",
+    ),
+    NativePatchRule(
+        "Linux in-content controls",
+        IN_CONTENT_CONTROLS_FIND,
+        IN_CONTENT_CONTROLS_REPLACE,
+        _CONTROLS_STRUCTURAL,
+        path_prefix="dist/renderer/assets/",
+    ),
+    NativePatchRule(
+        "second-instance reveal",
+        SECOND_INSTANCE_REVEAL_FIND,
+        SECOND_INSTANCE_REVEAL_REPLACE,
+        _SECOND_INSTANCE_STRUCTURAL,
+        path_prefix="dist/electron-main/main-core.cjs",
+    ),
+    NativePatchRule(
+        "hardware-acceleration relaunch",
+        RELAUNCH_QUIT_FIND,
+        RELAUNCH_QUIT_REPLACE,
+        _RELAUNCH_STRUCTURAL,
+        path_prefix="dist/electron-main/main-app.cjs",
+    ),
+    NativePatchRule(
+        "close-to-hide lifecycle",
+        CLOSE_INTERCEPT_FIND,
+        CLOSE_INTERCEPT_REPLACE,
+        _CLOSE_STRUCTURAL,
+        extension=True,
+        path_prefix="dist/electron-main/main-core.cjs",
+    ),
+    NativePatchRule(
+        "window-all-closed quit arming",
+        QUIT_ARM_FIND,
+        QUIT_ARM_REPLACE,
+        _QUIT_ARM_STRUCTURAL,
+        extension=True,
+        path_prefix="dist/electron-main/main-core.cjs",
+    ),
+    NativePatchRule(
+        "BrowserWindow menu hiding",
+        MENU_HIDE_FIND,
+        MENU_HIDE_REPLACE,
+        _MENU_HIDE_STRUCTURAL,
+        extension=True,
+        path_prefix="dist/electron-main/main-core.cjs",
+    ),
+    NativePatchRule(
+        "single-instance graceful SIGTERM bridge",
+        SIGTERM_QUIT_BRIDGE_FIND,
+        SIGTERM_QUIT_BRIDGE_REPLACE,
+        _SIGTERM_STRUCTURAL,
+        extension=True,
+        path_prefix="dist/electron-main/main-core.cjs",
+    ),
+)
+
+
 def _validate_patch_pair(find: bytes, replace: bytes) -> None:
     if (
         not isinstance(find, bytes)
@@ -208,6 +516,150 @@ def _member_bytes(blob: bytes, meta: dict, data_offset: int) -> bytes:
     if end > len(blob):
         raise TransformError("asar member extends past the archive")
     return blob[start:end]
+
+
+def _packed_contents(blob: bytes) -> dict[str, bytes]:
+    header, _json_start, _json_len, data_offset = read_asar(blob)
+    return {
+        path: _member_bytes(blob, meta, data_offset)
+        for path, meta in _walk_files(header)
+        if not meta.get("unpacked")
+    }
+
+
+def _same_semantic_occurrence(
+    first: PatchCandidate,
+    second: PatchCandidate,
+) -> bool:
+    """Treat exact and structural detections as one occurrence only when spans contain one another."""
+    return first[0] == second[0] and (
+        (first[1] <= second[1] and second[2] <= first[2])
+        or (second[1] <= first[1] and first[2] <= second[2])
+    )
+
+
+def _semantic_candidates(
+    exact_candidates: list[PatchCandidate],
+    structural_candidates: list[PatchCandidate],
+) -> list[PatchCandidate]:
+    """Merge only a one-to-one exact/structural view of one occurrence."""
+    components: list[list[PatchCandidate]] = []
+    for candidate in exact_candidates + structural_candidates:
+        related = [
+            index
+            for index, component in enumerate(components)
+            if any(
+                _same_semantic_occurrence(candidate, existing)
+                for existing in component
+            )
+        ]
+        if not related:
+            components.append([candidate])
+            continue
+        merged = [candidate]
+        for index in reversed(related):
+            merged[0:0] = components.pop(index)
+        components.append(merged)
+
+    semantic: list[PatchCandidate] = []
+    for component in components:
+        exact = [candidate for candidate in component if candidate[3] is None]
+        structural = [candidate for candidate in component if candidate[3] is not None]
+        if len(exact) == 1 and len(structural) == 1:
+            semantic.append(exact[0])
+        else:
+            semantic.extend(component)
+    return semantic
+
+
+def _apply_native_frame_rules(
+    blob: bytes,
+) -> tuple[bytes, list[tuple[NativePatchRule, str, bytes]]]:
+    """Apply legacy byte rules or their uniquely identified structural fallbacks."""
+    header, json_start, json_len, data_offset = read_asar(blob)
+    contents = {
+        path: _member_bytes(blob, meta, data_offset)
+        for path, meta in _walk_files(header)
+        if not meta.get("unpacked")
+    }
+    applied: list[tuple[NativePatchRule, str, bytes]] = []
+
+    for rule in NATIVE_PATCH_RULES:
+        exact_candidates: list[PatchCandidate] = [
+            (path, match.start(), match.end(), None)
+            for path, content in contents.items()
+            if rule.find in content
+            and (rule.path_prefix is None or path.startswith(rule.path_prefix))
+            for match in re.finditer(re.escape(rule.find), content)
+        ]
+        structural_candidates: list[PatchCandidate] = []
+        if rule.structural is not None:
+            structural_candidates = [
+                (path, match.start(), match.end(), match)
+                for path, content in contents.items()
+                if rule.path_prefix is None or path.startswith(rule.path_prefix)
+                for match in rule.structural.pattern.finditer(content)
+            ]
+
+        candidates = _semantic_candidates(exact_candidates, structural_candidates)
+        if len(candidates) != 1:
+            locations = [
+                (path, start, end, "exact" if match is None else "structural")
+                for path, start, end, match in candidates
+            ]
+            raise TransformError(
+                "expected exactly one semantic ASAR occurrence of %s, found %s"
+                % (rule.name, locations)
+            )
+
+        path, start, end, structural_match = candidates[0]
+        if structural_match is None:
+            replacement = rule.replace
+            updated = contents[path][:start] + replacement + contents[path][end:]
+            if rule.extension:
+                if replacement not in updated:
+                    raise TransformError(
+                        "patch did not apply %r in %s" % (replacement, path)
+                    )
+            elif rule.find in updated:
+                raise TransformError(
+                    "patch did not consume %r in %s" % (rule.find, path)
+                )
+        else:
+            if rule.structural is None:
+                raise TransformError("structural candidate without a structural rule")
+            replacement = rule.structural.replacement(structural_match)
+            if not isinstance(replacement, bytes) or replacement == structural_match.group(0):
+                raise TransformError(
+                    "structural patch %s produced no change" % rule.structural.name
+                )
+            original = contents[path]
+            updated = original[:start] + replacement + original[end:]
+            if rule.extension:
+                if replacement not in updated:
+                    raise TransformError(
+                        "structural patch %s did not apply" % rule.structural.name
+                    )
+            elif rule.structural.pattern.search(updated):
+                raise TransformError(
+                    "structural patch %s did not consume its source shape"
+                    % rule.structural.name
+                )
+
+        contents[path] = updated
+        applied.append((rule, path, replacement))
+
+    result = _rebuild_asar(blob, header, json_start, json_len, data_offset, contents)
+    rebuilt_contents = _packed_contents(result)
+    for rule, path, replacement in applied:
+        data = rebuilt_contents.get(path)
+        if data is None or replacement not in data:
+            raise TransformError("expected replacement is missing: %s" % rule.name)
+        if rule.extension and rule.structural is None and data.count(rule.find) != 1:
+            raise TransformError("expected anchor exactly once in output: %r" % rule.find)
+        if not rule.extension and rule.find in data:
+            raise TransformError("expected source shape is still present: %s" % rule.name)
+    return result, applied
 
 
 def _sha256_hex(data: bytes) -> str:
@@ -490,24 +942,16 @@ def apply_transforms(
 
 
 def apply_native_frame_patches(blob: bytes) -> bytes:
-    """Patch packed members and rebuild the archive. Fail if a pattern is
-    absent or repeated."""
-    result, _touched = apply_transforms(blob, PATCHES, EXTENSIONS)
+    """Patch packed members and rebuild the archive fail-closed.
+
+    Legacy releases use the byte-exact rules above. Newer minified bundles may
+    rename local identifiers, so each affected rule also has a narrowly scoped
+    structural fallback. Both paths require exactly one match.
+    """
+    result, _applied = _apply_native_frame_rules(blob)
 
     if WINDOWS_WCO_MARK not in result or MAC_FRAME_MARK not in result:
         raise TransformError("refusing to drop macOS/Windows window chrome")
-    for find, replace in PATCHES:
-        if find in result:
-            raise TransformError("expected pattern is still present: %r" % (find,))
-        if replace not in result:
-            raise TransformError("expected replacement is missing: %r" % (replace,))
-    for find, replace in EXTENSIONS:
-        if replace not in result:
-            raise TransformError("expected replacement is missing: %r" % (replace,))
-        if result.count(find) != 1:
-            raise TransformError(
-                "expected anchor exactly once in output: %r" % (find,)
-            )
     return result
 
 
