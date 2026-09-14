@@ -354,6 +354,21 @@ jobs:
           KEY_ID="$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ {print $5; exit}')"
           test -n "${KEY_ID}" || { echo "no GPG signing key available" >&2; exit 1; }
           flatpak build-update-repo --prune --gpg-sign="${KEY_ID}" site
+          gpg --export "${KEY_ID}" > "${RUNNER_TEMP}/grok-bot.gpg"
+          test -s "${RUNNER_TEMP}/grok-bot.gpg" || { echo "failed to export repository public key" >&2; exit 1; }
+          GPG_B64="$(base64 -w0 "${RUNNER_TEMP}/grok-bot.gpg")"
+          test -n "${GPG_B64}" || { echo "empty repository public key encoding" >&2; exit 1; }
+          {
+            printf '%s\n' '[Flatpak Repo]'
+            printf '%s\n' 'Title=Unofficial Grok Bot'
+            printf '%s\n' 'Url=https://viniciosrab.github.io/grok-bot-flatpak/'
+            printf '%s\n' 'Homepage=https://github.com/viniciosrab/grok-bot-flatpak'
+            printf '%s\n' 'Comment=Unofficial Grok Bot Flatpak'
+            printf 'GPGKey=%s\n' "${GPG_B64}"
+          } > site/grok-bot.flatpakrepo
+          test -s site/grok-bot.flatpakrepo || { echo "failed to write grok-bot.flatpakrepo" >&2; exit 1; }
+          grep -q '^GPGKey=' site/grok-bot.flatpakrepo || { echo "grok-bot.flatpakrepo is missing GPGKey" >&2; exit 1; }
+          cp "${RUNNER_TEMP}/grok-bot.gpg" site/grok-bot.gpg
           tar -czf site.tar.gz site
 
       - name: Tag the internal build for audit and rollback

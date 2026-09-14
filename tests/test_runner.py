@@ -1442,6 +1442,34 @@ class PublishTransportContractTests(unittest.TestCase):
         self.assertLess(recover_idx, first_cond_idx)
         self.assertLess(first_cond_idx, second_cond_idx)
 
+    def test_publish_exports_repo_public_key_before_site_tarball(self):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        sign_idx = text.index(
+            'flatpak build-update-repo --prune --gpg-sign="${KEY_ID}" site'
+        )
+        export_idx = text.index('gpg --export "${KEY_ID}"')
+        repo_idx = text.index("site/grok-bot.flatpakrepo")
+        key_idx = text.index("site/grok-bot.gpg")
+        tar_idx = text.index("tar -czf site.tar.gz site")
+        self.assertLess(sign_idx, export_idx)
+        self.assertLess(export_idx, repo_idx)
+        self.assertLess(export_idx, key_idx)
+        self.assertLess(repo_idx, tar_idx)
+        self.assertLess(key_idx, tar_idx)
+        self.assertIn("failed to export repository public key", text)
+        self.assertIn("empty repository public key encoding", text)
+        self.assertIn("grok-bot.flatpakrepo is missing GPGKey", text)
+        self.assertIn("Url=https://viniciosrab.github.io/grok-bot-flatpak/", text)
+
+    def test_readme_adds_remote_with_published_flatpakrepo(self):
+        readme = read_repo_text(os.path.join(REPO_ROOT, "README.md"))
+        self.assertNotIn("--no-gpg-verify", readme)
+        self.assertIn(
+            "https://viniciosrab.github.io/grok-bot-flatpak/grok-bot.flatpakrepo",
+            readme,
+        )
+        self.assertIn("flatpak remote-delete --user grok-bot", readme)
+
 
 class ReleaseBehaviorContractTests(unittest.TestCase):
     """User-approved release behavior.

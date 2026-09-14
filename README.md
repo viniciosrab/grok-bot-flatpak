@@ -13,8 +13,8 @@ Install Flatpak through your Linux distribution, then run:
 flatpak remote-add --user --if-not-exists flathub \
   https://flathub.org/repo/flathub.flatpakrepo
 
-flatpak remote-add --user --if-not-exists --no-gpg-verify grok-bot \
-  https://viniciosrab.github.io/grok-bot-flatpak/
+flatpak remote-add --user --if-not-exists grok-bot \
+  https://viniciosrab.github.io/grok-bot-flatpak/grok-bot.flatpakrepo
 
 flatpak install --user grok-bot \
   io.github.viniciosrab.GrokBot//master
@@ -22,9 +22,11 @@ flatpak install --user grok-bot \
 
 Flathub is only used for the KDE runtime below. The application itself is not available on Flathub.
 
-### Signature limitation
+If you already added this remote before signature verification was published, delete it and run the commands above again:
 
-The repository is signed during publication, but its public signing key is not published yet. The `--no-gpg-verify` option is therefore currently required when adding the remote. HTTPS still protects the download in transit, but it does not replace client-side signature verification.
+```bash
+flatpak remote-delete --user grok-bot
+```
 
 ## Launch
 
@@ -70,7 +72,7 @@ flatpak remote-delete --user grok-bot
 
 - Unofficial package; for vendor support, use the vendor's own distribution.
 - Grok Bot itself remains proprietary upstream software.
-- See the signature limitation above before adding the repository.
+- Flatpak verifies this repository's signature. That authenticates the package build, not the upstream vendor.
 
 ## Releases and downloads
 
