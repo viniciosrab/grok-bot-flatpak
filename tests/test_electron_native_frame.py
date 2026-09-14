@@ -6,6 +6,8 @@ import importlib.util
 import io
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stderr
@@ -88,6 +90,21 @@ SECOND_INSTANCE_PATCHED = (
 # graceful app.quit cleanup instead of killing Electron raw.
 SIGTERM_UPSTREAM = 'ru||he.app.quit();'
 SIGTERM_PATCHED = 'ru||he.app.quit();process.on("SIGTERM",()=>{he.app.quit()});'
+# Byte-exact vendor hardware-acceleration relaunch from
+# dist/electron-main/main-app.cjs: quit() after relaunch() is aborted by
+# vendor before-quit preventDefault, so the process stays alive. Same-length
+# swap to exit() actually terminates this instance. Window X still hides.
+RELAUNCH_UPSTREAM = 'ye.app.relaunch(),ye.app.quit()'
+RELAUNCH_PATCHED = 'ye.app.relaunch(),ye.app.exit()'
+RELAUNCH_CONTEXT_UPSTREAM = (
+    'hardwareAccelerationEnabledAtLaunch:SFt,'
+    'relaunchDesktop:()=>{let B=re.environment.restartExitCode;'
+    'if(B!=null){N4(B);return}ye.app.relaunch(),ye.app.quit()},'
+    'getMachineId:()=>tt()'
+)
+RELAUNCH_CONTEXT_PATCHED = RELAUNCH_CONTEXT_UPSTREAM.replace(
+    RELAUNCH_UPSTREAM, RELAUNCH_PATCHED
+)
 # Byte-exact vendor focus chain proving the focus target reveals a hidden
 # window (restore when minimized, show, then focus), not a bare focus.
 FOCUS_CHAIN = (
@@ -124,6 +141,7 @@ def load_runner_tests():
 def sample_asar(tool, extra=None):
     files = {
         "dist/electron-main/main-core.cjs": FULL_CORE_UPSTREAM.encode("utf-8"),
+        "dist/electron-main/main-app.cjs": RELAUNCH_CONTEXT_UPSTREAM.encode("utf-8"),
         "dist/renderer/assets/index-C57MhV1e.js": LINUX_CONTROLS.encode("utf-8"),
         "keep/other.cjs": UNRELATED.encode("utf-8"),
     }
@@ -177,6 +195,10 @@ class NativeFrameTransformTests(unittest.TestCase):
         self.assertTrue(renderer.startswith('if(c==="darwin")return null'))
         self.assertIn("if(1)return null", renderer)
         self.assertNotIn("if(o)return null;let C,T,E,R,M;if(e[15]!==r)", renderer)
+        app = self.tool.member_content(
+            patched, "dist/electron-main/main-app.cjs"
+        ).decode("utf-8")
+        self.assertEqual(app, RELAUNCH_CONTEXT_PATCHED)
 
     def test_menu_bar_hidden_while_native_frame_coexists(self):
         blob = sample_asar(self.tool)
@@ -224,6 +246,9 @@ class NativeFrameTransformTests(unittest.TestCase):
         blob = self.tool.write_asar(
             {
                 "dist/electron-main/main-core.cjs": core_text.encode("utf-8"),
+                "dist/electron-main/main-app.cjs": RELAUNCH_CONTEXT_UPSTREAM.encode(
+                    "utf-8"
+                ),
                 "dist/renderer/assets/index-C57MhV1e.js": LINUX_CONTROLS.encode("utf-8"),
             }
         )
@@ -255,6 +280,124 @@ class NativeFrameTransformTests(unittest.TestCase):
                 )
                 with self.assertRaises(self.tool.TransformError):
                     self.tool.apply_native_frame_patches(bad)
+
+    def test_relaunch_uses_exit_not_hide_and_close_without_quitting_still_hides(self):
+        blob = sample_asar(self.tool)
+        patched = self.tool.apply_native_frame_patches(blob)
+        core = self.tool.member_content(
+            patched, "dist/electron-main/main-core.cjs"
+        ).decode("utf-8")
+        app = self.tool.member_content(
+            patched, "dist/electron-main/main-app.cjs"
+        ).decode("utf-8")
+        # GPU restart must terminate this instance (exit), not hide.
+        self.assertIn(RELAUNCH_PATCHED, app)
+        self.assertNotIn(RELAUNCH_UPSTREAM, app)
+        self.assertIn(self.tool.RELAUNCH_QUIT_REPLACE.decode("utf-8"), app)
+        self.assertNotIn(self.tool.RELAUNCH_QUIT_FIND, patched)
+        self.assertEqual(len(self.tool.RELAUNCH_QUIT_FIND), 31)
+        self.assertEqual(
+            len(self.tool.RELAUNCH_QUIT_FIND),
+            len(self.tool.RELAUNCH_QUIT_REPLACE),
+        )
+        self.assertEqual(app.count("ye.app.relaunch(),ye.app.exit()"), 1)
+        self.assertNotIn("ye.app.relaunch(),ye.app.quit()", app)
+        # Window X without a real quit still hides.
+        self.assertIn(
+            's.on("close",e=>{he.app.quitting||(e.preventDefault(),s.hide())})',
+            core,
+        )
+        self.assertIn(CLOSE_PATCHED, core)
+
+        full_core = FULL_CORE_UPSTREAM
+        variants = {
+            "missing relaunch bytes": sample_asar(
+                self.tool,
+                extra={
+                    "dist/electron-main/main-app.cjs": b"no relaunch here",
+                },
+            ),
+            "doubled relaunch bytes": sample_asar(
+                self.tool,
+                extra={
+                    "dist/copy/main-app.cjs": RELAUNCH_CONTEXT_UPSTREAM.encode(
+                        "utf-8"
+                    ),
+                },
+            ),
+        }
+        for name, variant in variants.items():
+            with self.subTest(name):
+                with self.assertRaises(self.tool.TransformError):
+                    self.tool.apply_native_frame_patches(variant)
+
+        missing_close = self.tool.write_asar(
+            {
+                "dist/electron-main/main-core.cjs": full_core.replace(
+                    CLOSE_UPSTREAM, ""
+                ).encode("utf-8"),
+                "dist/electron-main/main-app.cjs": RELAUNCH_CONTEXT_UPSTREAM.encode(
+                    "utf-8"
+                ),
+                "dist/renderer/assets/index-C57MhV1e.js": LINUX_CONTROLS.encode(
+                    "utf-8"
+                ),
+            }
+        )
+        with self.assertRaises(self.tool.TransformError):
+            self.tool.apply_native_frame_patches(missing_close)
+
+    def test_relaunch_bytes_grounded_if_asar_present(self):
+        candidates = [
+            os.path.join(
+                REPO_ROOT, "build-dir", "files", "grok-bot", "resources", "app.asar"
+            ),
+            os.environ.get("GROK_BOT_APP_ASAR", ""),
+        ]
+        present = [path for path in candidates if path and os.path.isfile(path)]
+        if not present:
+            return
+        find = self.tool.RELAUNCH_QUIT_FIND
+        replace = self.tool.RELAUNCH_QUIT_REPLACE
+        for path in present:
+            with self.subTest(path=path):
+                with open(path, "rb") as handle:
+                    blob = handle.read()
+                find_count = blob.count(find)
+                replace_count = blob.count(replace)
+                self.assertEqual(len(find), 31)
+                # Vendor original: find once. Already-patched payload: replace
+                # once. Never both, never neither, never duplicates.
+                self.assertEqual(find_count + replace_count, 1, path)
+                self.assertLessEqual(find_count, 1, path)
+                self.assertLessEqual(replace_count, 1, path)
+
+    def test_relaunch_vs_hide_node_probe(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node is required for the relaunch vs hide probe")
+        script = r"""
+const closeWithoutQuitting = (quitting) =>
+  quitting ? "destroy" : "hide";
+const relaunch = process.argv[1];
+const closeShape = process.argv[2];
+if (closeWithoutQuitting(false) !== "hide") process.exit(2);
+if (closeWithoutQuitting(true) !== "destroy") process.exit(3);
+if (!relaunch.includes("ye.app.relaunch(),ye.app.exit()")) process.exit(4);
+if (relaunch.includes("ye.app.relaunch(),ye.app.quit()")) process.exit(5);
+if (!closeShape.includes("e.preventDefault(),s.hide()")) process.exit(6);
+if (!closeShape.includes("he.app.quitting||")) process.exit(7);
+process.stdout.write("relaunch=exit close=!quitting:hide\n");
+"""
+        proc = subprocess.run(
+            [node, "-e", script, RELAUNCH_PATCHED, CLOSE_PATCHED],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.strip(), "relaunch=exit close=!quitting:hide")
 
     def test_close_prevents_default_and_hides_while_quit_survives(self):
         blob = sample_asar(self.tool)
@@ -476,6 +619,9 @@ class NativeFrameTransformTests(unittest.TestCase):
         blob = self.tool.write_asar(
             {
                 "dist/electron-main/main-core.cjs": FULL_CORE_UPSTREAM.encode("utf-8"),
+                "dist/electron-main/main-app.cjs": RELAUNCH_CONTEXT_UPSTREAM.encode(
+                    "utf-8"
+                ),
                 "dist/renderer/assets/index-C57MhV1e.js": LINUX_CONTROLS.encode("utf-8"),
             },
             block_size=block_size,

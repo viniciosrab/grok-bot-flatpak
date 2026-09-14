@@ -34,6 +34,17 @@ application menu bar is hidden by default through the documented
 native frame and titlebar stay intact while Alt still reveals the
 untouched application menu with its roles and shortcuts.
 
+Hardware-acceleration restart (byte-exact vendor shape from
+dist/electron-main/main-app.cjs, the only member containing it): the
+toggle persists then calls `relaunchDesktop`, which is
+`app.relaunch()` plus `app.quit()`. GPU policy is launch-only, and
+vendor `before-quit` preventDefault while draining the detached
+local-exec daemon aborts that quit. The hide-to-tray interceptor then
+sees the armed quitting flag and can destroy/recreate the window
+without exiting, so Chromium never relaunches. A same-length swap to
+`app.exit()` terminates this instance so the stored GPU preference
+applies on the new process. `exit()` skips before-quit daemon drain.
+
 Member sizes may grow: the archive is rebuilt by splicing only the
 changed size, offset, and integrity values into the original JSON header,
 so unpacked entries and unknown fields are preserved byte for byte. Every
@@ -117,10 +128,19 @@ SIGTERM_QUIT_BRIDGE_FIND = b"ru||he.app.quit();"
 SIGTERM_QUIT_BRIDGE_REPLACE = (
     b"ru||he.app.quit();process.on(\"SIGTERM\",()=>{he.app.quit()});"
 )
+# Hardware-acceleration relaunch: byte-exact vendor shape from the packed
+# main-process bundle (dist/electron-main/main-app.cjs, the only member
+# containing it). Same-length swap: quit() after relaunch() is aborted by
+# vendor before-quit preventDefault, so the process often stays alive and
+# GPU flags never change. exit() terminates this instance. It skips the
+# before-quit daemon drain.
+RELAUNCH_QUIT_FIND = b"ye.app.relaunch(),ye.app.quit()"
+RELAUNCH_QUIT_REPLACE = b"ye.app.relaunch(),ye.app.exit()"
 PATCHES = (
     (NATIVE_FRAME_FIND, NATIVE_FRAME_REPLACE),
     (IN_CONTENT_CONTROLS_FIND, IN_CONTENT_CONTROLS_REPLACE),
     (SECOND_INSTANCE_REVEAL_FIND, SECOND_INSTANCE_REVEAL_REPLACE),
+    (RELAUNCH_QUIT_FIND, RELAUNCH_QUIT_REPLACE),
 )
 # Anchor-preserving appends: the anchor FIND stays in the output inside its
 # REPLACE, so post-guards require the REPLACE present and the anchor
