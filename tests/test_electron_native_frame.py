@@ -121,6 +121,49 @@ FULL_CORE_PATCHED = (
     + CLOSE_PATCHED + ARM_PATCHED + SECOND_INSTANCE_PATCHED + FOCUS_CHAIN
 )
 
+# Representative Sand 0.51.0 shapes observed in the downloaded x86_64
+# AppImage. The stable syntax is retained while ordinary minifier identifiers
+# differ from the legacy fixture above.
+MODERN_LINUX_FRAMELESS = (
+    'function rP(e){return e.isMac?{frame:!0,titleBarStyle:"hiddenInset",'
+    'trafficLightPosition:YI}:e.isWindows?{frame:!1,titleBarStyle:"hidden",'
+    'titleBarOverlay:tP(e.backgroundColor)}:{frame:!1,titleBarStyle:"default"}}'
+)
+MODERN_LINUX_CONTROLS = (
+    'if(c==="darwin")return null;if(c==="win32"){let W;return W}'
+    'if(o)return null;let C,A,E,R,N;if(e[15]!==r){drawButtons()}'
+)
+MODERN_WINDOW_CREATE_UPSTREAM = (
+    'i=new is.BrowserWindow({...a.windowOptions,title:is.app.getName(),'
+    'webPreferences:{sandbox:!0}})'
+)
+MODERN_CLOSE_UPSTREAM = (
+    's.on("closed",()=>{Dh.markRendererNotReady()});let c=AP({window:TP(s),'
+    'app:{onceBeforeQuit:d=>he.app.once("before-quit",d)}})'
+)
+MODERN_ARM_UPSTREAM = (
+    'he.app.on("window-all-closed",()=>{process.platform!=="darwin"'
+    '&&he.app.quit()})'
+)
+MODERN_SECOND_INSTANCE_UPSTREAM = (
+    's=(c,l)=>{let d=Mh(r,l);if(d.length===0){t.focus();return}'
+    'for(let u of d)o.handleCandidate(u,"second-instance")}'
+)
+MODERN_SIGTERM_UPSTREAM = (
+    'var su=!he.app.isPackaged||he.app.requestSingleInstanceLock();'
+    'su||he.app.quit();'
+)
+MODERN_CORE_UPSTREAM = (
+    MODERN_LINUX_FRAMELESS + MODERN_WINDOW_CREATE_UPSTREAM
+    + MODERN_SIGTERM_UPSTREAM + MODERN_CLOSE_UPSTREAM
+    + MODERN_ARM_UPSTREAM + MODERN_SECOND_INSTANCE_UPSTREAM + FOCUS_CHAIN
+)
+MODERN_RELAUNCH_CONTEXT_UPSTREAM = (
+    'hardwareAccelerationEnabledAtLaunch:SK,relaunchDesktop:()=>{let B='
+    'ne.environment.restartExitCode;if(B!=null){zZ(B);return}'
+    'me.app.relaunch(),me.app.quit()},getMachineId:()=>it()'
+)
+
 
 def load_tool():
     spec = importlib.util.spec_from_file_location("patch_electron_native_frame", TOOL_PATH)
@@ -144,6 +187,21 @@ def sample_asar(tool, extra=None):
         "dist/electron-main/main-app.cjs": RELAUNCH_CONTEXT_UPSTREAM.encode("utf-8"),
         "dist/renderer/assets/index-C57MhV1e.js": LINUX_CONTROLS.encode("utf-8"),
         "keep/other.cjs": UNRELATED.encode("utf-8"),
+    }
+    if extra:
+        files.update(extra)
+    return tool.write_asar(files)
+
+
+def sample_modern_asar(tool, extra=None):
+    files = {
+        "dist/electron-main/main-core.cjs": MODERN_CORE_UPSTREAM.encode("utf-8"),
+        "dist/electron-main/main-app.cjs": MODERN_RELAUNCH_CONTEXT_UPSTREAM.encode(
+            "utf-8"
+        ),
+        "dist/renderer/assets/index-B7CuLxVI.js": MODERN_LINUX_CONTROLS.encode(
+            "utf-8"
+        ),
     }
     if extra:
         files.update(extra)
@@ -320,9 +378,9 @@ class NativeFrameTransformTests(unittest.TestCase):
             "doubled relaunch bytes": sample_asar(
                 self.tool,
                 extra={
-                    "dist/copy/main-app.cjs": RELAUNCH_CONTEXT_UPSTREAM.encode(
-                        "utf-8"
-                    ),
+                    "dist/electron-main/main-app.cjs": (
+                        RELAUNCH_CONTEXT_UPSTREAM + RELAUNCH_CONTEXT_UPSTREAM
+                    ).encode("utf-8"),
                 },
             ),
         }
@@ -515,7 +573,125 @@ process.stdout.write("relaunch=exit close=!quitting:hide\n");
         blob = sample_asar(
             self.tool,
             extra={
-                "dist/copy/main-core.cjs": LINUX_FRAMELESS.encode("utf-8"),
+                "dist/electron-main/main-core.cjs": (
+                    FULL_CORE_UPSTREAM + LINUX_FRAMELESS
+                ).encode("utf-8"),
+            },
+        )
+        with self.assertRaises(self.tool.TransformError):
+            self.tool.apply_native_frame_patches(blob)
+
+    def test_0510_minifier_renamed_shapes_are_patched(self):
+        blob = sample_modern_asar(self.tool)
+        patched = self.tool.apply_native_frame_patches(blob)
+        core = self.tool.member_content(
+            patched, "dist/electron-main/main-core.cjs"
+        )
+        app = self.tool.member_content(
+            patched, "dist/electron-main/main-app.cjs"
+        )
+        renderer = self.tool.member_content(
+            patched, "dist/renderer/assets/index-B7CuLxVI.js"
+        )
+
+        self.assertIn(b'{frame:!0,titleBarStyle:"default"}', core)
+        self.assertIn(b"autoHideMenuBar:!0", core)
+        self.assertIn(b'e.preventDefault(),s.hide()', core)
+        self.assertIn(b'he.app.once("before-quit",()=>{he.app.quitting=!0})', core)
+        self.assertIn(b't.focus();if(d.length!==0)', core)
+        self.assertIn(b'process.on("SIGTERM",()=>{he.app.quit()})', core)
+        self.assertIn(b"if(1)return null;let C,A,E,R,N;if(e[15]!==r)", renderer)
+        self.assertNotIn(b"if(o)return null;let C,A,E,R,N;if(e[15]!==r)", renderer)
+        self.assertIn(b"me.app.relaunch(),me.app.exit()", app)
+        self.assertNotIn(b"me.app.relaunch(),me.app.quit()", app)
+
+        header, _json_start, _json_len, data_offset = self.tool.read_asar(patched)
+        for path, meta in self.tool._walk_files(header):
+            if meta.get("unpacked"):
+                continue
+            data = self.tool.member_content(patched, path)
+            self.assertEqual(meta["size"], len(data), path)
+            integrity = meta["integrity"]
+            self.assertEqual(integrity["hash"], hashlib.sha256(data).hexdigest(), path)
+            self.assertEqual(
+                integrity["blocks"],
+                [
+                    hashlib.sha256(
+                        data[index : index + integrity["blockSize"]]
+                    ).hexdigest()
+                    for index in range(0, len(data), integrity["blockSize"])
+                ],
+                path,
+            )
+        self.assertGreater(data_offset, 0)
+
+    def test_structural_fallback_rejects_ambiguity_and_near_misses(self):
+        for decoy_path in (
+            "dist/renderer/assets/index-copy.js",
+            "dist/renderer/assets/index-AAAAAAAA.js",
+        ):
+            with self.subTest(decoy_path=decoy_path):
+                ambiguous = sample_modern_asar(
+                    self.tool,
+                    extra={decoy_path: MODERN_LINUX_CONTROLS.encode("utf-8")},
+                )
+                with self.assertRaises(self.tool.TransformError):
+                    self.tool.apply_native_frame_patches(ambiguous)
+
+        near_miss = sample_modern_asar(
+            self.tool,
+            extra={
+                "dist/renderer/assets/index-B7CuLxVI.js": MODERN_LINUX_CONTROLS.replace(
+                    "e[15]!==r", "e[14]!==r"
+                ).encode("utf-8")
+            },
+        )
+        with self.assertRaises(self.tool.TransformError):
+            self.tool.apply_native_frame_patches(near_miss)
+
+        duplicated_relaunch = sample_modern_asar(
+            self.tool,
+            extra={
+                "dist/electron-main/main-app.cjs": (
+                    MODERN_RELAUNCH_CONTEXT_UPSTREAM
+                    + MODERN_RELAUNCH_CONTEXT_UPSTREAM
+                ).encode("utf-8")
+            },
+        )
+        with self.assertRaises(self.tool.TransformError):
+            self.tool.apply_native_frame_patches(duplicated_relaunch)
+
+    def test_renderer_exact_decoy_and_modern_structural_match_are_ambiguous(self):
+        decoy_path = "dist/renderer/assets/unrelated.js"
+        blob = sample_modern_asar(
+            self.tool,
+            extra={decoy_path: self.tool.IN_CONTENT_CONTROLS_FIND},
+        )
+        with self.assertRaises(self.tool.TransformError):
+            self.tool.apply_native_frame_patches(blob)
+
+    def test_exact_legacy_anchor_in_wrong_path_fails_closed(self):
+        blob = sample_asar(
+            self.tool,
+            extra={
+                "dist/electron-main/main-core.cjs": FULL_CORE_UPSTREAM.replace(
+                    LINUX_FRAMELESS, ""
+                ).encode("utf-8"),
+                "keep/wrong-frame.cjs": LINUX_FRAMELESS.encode("utf-8"),
+            },
+        )
+        with self.assertRaises(self.tool.TransformError):
+            self.tool.apply_native_frame_patches(blob)
+
+    def test_relaunch_pair_outside_target_function_fails_closed(self):
+        outside_target = (
+            'relaunchDesktop:()=>{let B=ne.environment.restartExitCode;return},'
+            'otherTask:()=>{me.app.relaunch(),me.app.quit()}'
+        )
+        blob = sample_modern_asar(
+            self.tool,
+            extra={
+                "dist/electron-main/main-app.cjs": outside_target.encode("utf-8")
             },
         )
         with self.assertRaises(self.tool.TransformError):

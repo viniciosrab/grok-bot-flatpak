@@ -406,9 +406,11 @@ jobs:
             echo "pin PR base is not main; refusing to enable auto-merge" >&2
             exit 1
           fi
-          # The PR author must be the pin GitHub App (app/grok-bot-pin),
-          # whose bot login is grok-bot-pin[bot]; never auto-merge a foreign PR.
-          if [ "${PR_AUTHOR}" != "grok-bot-pin[bot]" ]; then
+          # GitHub exposes this App as app/grok-bot-pin through the current
+          # GraphQL-backed gh view, while older responses used its bot login.
+          # Accept only these two exact representations; never auto-merge a
+          # foreign PR.
+          if [ "${PR_AUTHOR}" != "app/grok-bot-pin" ] && [ "${PR_AUTHOR}" != "grok-bot-pin[bot]" ]; then
             echo "pin PR author is not the expected pin app; refusing to enable auto-merge" >&2
             exit 1
           fi
@@ -502,9 +504,11 @@ jobs:
             echo "pin PR base is not main; refusing to approve" >&2
             exit 1
           fi
-          # The PR author must be the pin GitHub App (app/grok-bot-pin),
-          # whose bot login is grok-bot-pin[bot]; never approve a foreign PR.
-          if [ "${PR_AUTHOR}" != "grok-bot-pin[bot]" ]; then
+          # GitHub exposes this App as app/grok-bot-pin through the current
+          # GraphQL-backed gh view, while older responses used its bot login.
+          # Accept only these two exact representations; never approve a
+          # foreign PR.
+          if [ "${PR_AUTHOR}" != "app/grok-bot-pin" ] && [ "${PR_AUTHOR}" != "grok-bot-pin[bot]" ]; then
             echo "pin PR author is not the expected pin app; refusing to approve" >&2
             exit 1
           fi

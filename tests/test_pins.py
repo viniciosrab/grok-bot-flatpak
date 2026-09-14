@@ -41,6 +41,7 @@ ALLOWED_PIN_PATHS = {"data/pins.yml", "io.github.viniciosrab.GrokBot.yml", "data
 REQUIRED_PIN_SECRETS = ("APP_ID", "APP_PRIVATE_KEY")
 ALLOWED_PUSH_REMOTE = "origin"
 EXPECTED_PIN_AUTHOR = "grok-bot-pin[bot]"
+EXPECTED_PIN_AUTHORS = frozenset((EXPECTED_PIN_AUTHOR, "app/grok-bot-pin"))
 EXPECTED_PIN_BASE = "main"
 DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
@@ -371,7 +372,7 @@ def pin_pr_identity_is_valid(number, state, head, base, author, expected_head):
         return False
     if base != EXPECTED_PIN_BASE:
         return False
-    return author == EXPECTED_PIN_AUTHOR
+    return author in EXPECTED_PIN_AUTHORS
 
 
 def porcelain_shows_only_allowed(output: str, allowed: set = ALLOWED_PIN_PATHS) -> bool:
@@ -797,6 +798,10 @@ class GitSafetyHelperTests(unittest.TestCase):
     def test_pin_pr_identity_checks_reject_foreign_prs(self):
         good = ("42", "OPEN", "pin/sand-0.47.0", "main", "grok-bot-pin[bot]")
         self.assertTrue(pin_pr_identity_is_valid(*good, "pin/sand-0.47.0"))
+        current_app_identity = (*good[:4], "app/grok-bot-pin")
+        self.assertTrue(
+            pin_pr_identity_is_valid(*current_app_identity, "pin/sand-0.47.0")
+        )
         # Non-positive or non-numeric numbers never identify a PR.
         for bad_number in ("", "0", "-3", "4.2", "12a", None, 42):
             bad = (bad_number, "OPEN", "pin/sand-0.47.0", "main", "grok-bot-pin[bot]")
@@ -816,7 +821,15 @@ class GitSafetyHelperTests(unittest.TestCase):
             pin_pr_identity_is_valid("42", "OPEN", "pin/sand-0.47.0", "main", "grok-bot-pin[bot]", "")
         )
         # Only the pin App bot may author an approvable pin PR.
-        for author in ("octocat", "github-actions[bot]", "dependabot[bot]", "", None):
+        for author in (
+            "octocat",
+            "github-actions[bot]",
+            "dependabot[bot]",
+            "app/grok-bot-pin-evil",
+            "grok-bot-pin",
+            "",
+            None,
+        ):
             bad = ("42", "OPEN", "pin/sand-0.47.0", "main", author)
             self.assertFalse(pin_pr_identity_is_valid(*bad, "pin/sand-0.47.0"), author)
 
@@ -1124,6 +1137,18 @@ class PinWorkflowContractTests(unittest.TestCase):
                 gh_api_approval_is_commit_bound(shlex.split(shell_command_of(line))),
                 f"approval line must satisfy the commit-bound contract: {line}",
             )
+
+    def test_pin_mutations_accept_only_known_app_identity_representations(self):
+        text = read_text(PIN_WORKFLOW_PATH)
+        for step_marker in ("gh pr merge --auto", "pulls/${PR_NUMBER}/reviews"):
+            step = workflow_step_containing(text, step_marker)
+            self.assertTrue(step, step_marker)
+            mutation = "enable auto-merge" if step_marker.startswith("gh pr") else "approve"
+            self.assertIn(
+                'if [ "${PR_AUTHOR}" != "app/grok-bot-pin" ] && [ "${PR_AUTHOR}" != "grok-bot-pin[bot]" ]; then',
+                step,
+            )
+            self.assertIn("refusing to %s" % mutation, step)
 
     def test_pin_pr_mutations_target_only_the_captured_number(self):
         text = read_text(PIN_WORKFLOW_PATH)
