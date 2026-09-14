@@ -35,6 +35,7 @@
 #include <KStatusNotifierItem>
 
 #ifdef Q_OS_UNIX
+#include <cerrno>
 #include <signal.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -53,6 +54,13 @@ constexpr char kElectronUserDataDirName[] = "Grok Bot";
 constexpr char kElectronSingletonSocketName[] = "SingletonSocket";
 constexpr int kColdProtocolSocketPollMs = 50;
 constexpr int kColdProtocolReadyTimeoutMs = 15000;
+// Tray Quit drains Electron gracefully first: vendor `before-quit` cleanup
+// shuts down the detached local-exec daemon (SIGTERM, 4s wait, SIGKILL),
+// so the companion signals only the tracked leader and waits for the whole
+// group to exit before forcing. Every wait stays bounded.
+constexpr int kGracefulQuitTimeoutMs = 8000;
+constexpr int kForceShutdownTimeoutMs = 2000;
+constexpr int kGroupPollSliceMs = 100;
 
 QString electronSingletonSocketPath()
 {
@@ -286,6 +294,54 @@ private:
         m_child->start();
     }
 
+    // Zero-signal probe: true when no process remains in pgid. Signal
+    // zero delivers nothing and no executable name is ever matched;
+    // EPERM (exists, no permission) counts as alive.
+    bool groupExited(pid_t pgid)
+    {
+        errno = 0;
+        return ::killpg(pgid, 0) != 0 && errno == ESRCH;
+    }
+
+    // Polls until the group exits or the timeout expires. Safe for the
+    // forced fallback: by then the tracked leader is reaped or hung, so a
+    // zombie cannot fake a live group (reparented members belong to init).
+    bool waitForProcessGroupExit(pid_t pgid, int timeoutMs)
+    {
+        QElapsedTimer clock;
+        clock.start();
+        for (;;) {
+            if (groupExited(pgid)) {
+                return true;
+            }
+            if (clock.hasExpired(timeoutMs)) {
+                break;
+            }
+            ::usleep(static_cast<useconds_t>(kGroupPollSliceMs) * 1000U);
+        }
+        return groupExited(pgid);
+    }
+
+    // Asks only the tracked leader to quit gracefully so vendor before-quit
+    // cleanup runs. waitForFinished reaps the leader through the event
+    // loop, so the group probe afterwards cannot mistake its zombie for a
+    // live member; stragglers still report failure for the forced path. A
+    // leader that already exited reports the group state immediately.
+    bool requestGracefulElectronQuit(pid_t pid, pid_t pgid)
+    {
+        errno = 0;
+        if (::kill(pid, 0) != 0 && errno == ESRCH) {
+            return groupExited(pgid);
+        }
+        if (::kill(pid, SIGTERM) != 0 && errno != ESRCH) {
+            qWarning("grok-bot-companion: failed to request graceful Electron quit");
+        }
+        if (!m_child->waitForFinished(kGracefulQuitTimeoutMs)) {
+            return false;
+        }
+        return groupExited(pgid);
+    }
+
     void terminateChildGroup()
     {
         if (m_child->state() == QProcess::NotRunning) {
@@ -298,10 +354,22 @@ private:
             // Signal only a group the child owns (setsid leader: pgid == pid),
             // never our own group, so an early Quit cannot kill the companion.
             if (pid > 1 && pgid == static_cast<pid_t>(pid) && pgid != ::getpgrp()) {
-                ::killpg(pgid, SIGTERM);
-                if (!m_child->waitForFinished(3000)) {
-                    ::killpg(pgid, SIGKILL);
-                    m_child->waitForFinished(3000);
+                // Graceful first: SIGTERM only the leader so Electron runs
+                // before-quit cleanup (detached daemon shutdown) instead of
+                // dying raw. A detached daemon in its own session is never
+                // reachable by group signals, so only this path cleans it.
+                const bool drained = requestGracefulElectronQuit(
+                    static_cast<pid_t>(pid), pgid);
+                if (!drained) {
+                    qWarning("grok-bot-companion: graceful quit timed out; forcing process-group shutdown");
+                    // Bounded forced fallback: an early leader exit cannot
+                    // leave group members silently alive; the group state is
+                    // re-polled after every step.
+                    ::killpg(pgid, SIGTERM);
+                    if (!waitForProcessGroupExit(pgid, kForceShutdownTimeoutMs)) {
+                        ::killpg(pgid, SIGKILL);
+                        waitForProcessGroupExit(pgid, kForceShutdownTimeoutMs);
+                    }
                 }
             }
         }

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Fail-closed ASAR patch: native Linux frame, no in-content window controls.
+"""Fail-closed ASAR patch: native Linux frame, no in-content window controls,
+close-to-hide lifecycle, and second-instance reveal.
 
 Packed vendor BrowserWindow chrome lives in app.asar. Linux currently
 creates a frameless window (`frame: false`, `titleBarStyle: "default"`)
@@ -11,6 +12,32 @@ Electron Window Controls Overlay (`titleBarOverlay`) is Windows-only in
 this payload and requires a non-default `titleBarStyle`. The Linux
 transform keeps the default title bar style, enables a native frame, and
 skips the in-content control widget. It never adds `titleBarOverlay`.
+
+Lifecycle (byte-exact vendor shapes from dist/electron-main/main-core.cjs,
+the only member containing them): closing the main window must hide it
+while Electron keeps running, so the existing KF6 tray Show (a second
+exec that the running single instance focuses) reveals the already-running
+window quickly. The existing `closed` listener is kept and a `close`
+interceptor is appended that prevents the default close and hides unless
+a `before-quit` flag was armed; the flag is armed by a `once` listener
+prepended to the untouched `window-all-closed` quit line, so an explicit
+quit still destroys and quits while the tray Quit action still terminates
+Electron and the companion at the process-group level. Tray Quit signals
+only the tracked leader first, and a SIGTERM listener converts that
+signal into graceful app.quit, so vendor `before-quit` cleanup shuts down
+the detached local-exec daemon before the process exits. Every
+second-instance activation runs the existing focus chain (restore when
+minimized, show, then focus) before handling links, including URL-bearing
+activations that previously handled links without revealing. The native
+application menu bar is hidden by default through the documented
+`autoHideMenuBar` window option at the verified creation seam, so the
+native frame and titlebar stay intact while Alt still reveals the
+untouched application menu with its roles and shortcuts.
+
+Member sizes may grow: the archive is rebuilt by splicing only the
+changed size, offset, and integrity values into the original JSON header,
+so unpacked entries and unknown fields are preserved byte for byte. Every
+pattern must occur exactly once or the transform fails closed.
 """
 
 from __future__ import annotations
@@ -28,10 +55,81 @@ IN_CONTENT_CONTROLS_FIND = b"if(o)return null;let C,T,E,R,M;if(e[15]!==r)"
 IN_CONTENT_CONTROLS_REPLACE = b"if(1)return null;let C,T,E,R,M;if(e[15]!==r)"
 WINDOWS_WCO_MARK = b'titleBarStyle:"hidden",titleBarOverlay:'
 MAC_FRAME_MARK = b'titleBarStyle:"hiddenInset"'
+# Close interception: byte-exact vendor shape from the packed main-process
+# bundle (dist/electron-main/main-core.cjs, the only member containing it).
+# The existing `closed` listener is preserved and a `close` interceptor is
+# appended: it prevents the default close and hides the window unless the
+# `before-quit` flag below was armed, so renderer signaling still fires on
+# a real close while a hidden window keeps its renderer ready.
+CLOSE_INTERCEPT_FIND = b's.on("closed",()=>{Ch.markRendererNotReady()})'
+CLOSE_INTERCEPT_REPLACE = (
+    b's.on("closed",()=>{Ch.markRendererNotReady()}),'
+    b's.on("close",e=>{he.app.quitting||(e.preventDefault(),s.hide())})'
+)
+# Quit arming: byte-exact vendor `window-all-closed` line from the same
+# bundle (also the only member containing it). A one-shot `before-quit`
+# listener is prepended to arm the flag; the quit line itself is untouched,
+# so it still quits once windows really close during an explicit quit.
+QUIT_ARM_FIND = (
+    b'he.app.on("window-all-closed",()=>{process.platform!=="darwin"'
+    b'&&he.app.quit()})'
+)
+QUIT_ARM_REPLACE = (
+    b'he.app.once("before-quit",()=>{he.app.quitting=!0}),'
+    b'he.app.on("window-all-closed",()=>{process.platform!=="darwin"'
+    b'&&he.app.quit()})'
+)
+# Second-instance reveal: byte-exact vendor shape from the packed
+# main-process bundle (dist/electron-main/main-core.cjs, the only member
+# containing it). The upstream activation handler only reveals on the
+# empty-argv path and merely handles links otherwise, so a hidden window
+# stays invisible for URL-bearing activations such as protocol callbacks.
+# The patched shape runs the existing focus target (restore when
+# minimized, show, then focus) on every activation before handling links.
+# Trailing empty statements keep the replacement the same byte length.
+SECOND_INSTANCE_REVEAL_FIND = (
+    b's=(c,l)=>{let d=Ph(r,l);if(d.length===0){t.focus();return}'
+    b'for(let u of d)o.handleCandidate(u,"second-instance")}'
+)
+SECOND_INSTANCE_REVEAL_REPLACE = (
+    b's=(c,l)=>{let d=Ph(r,l);t.focus();if(d.length!==0)'
+    b'for(let u of d)o.handleCandidate(u,"second-instance")};;;;;;;;'
+)
 
+# Hidden menu bar: byte-exact vendor shape from the single BrowserWindow
+# creation site in the packed main-process bundle
+# (dist/electron-main/main-core.cjs, the only member containing it). The
+# documented `autoHideMenuBar` option is inserted right after the window
+# options spread, so it wins over any spread value while the native frame,
+# the titlebar, and the application menu itself stay untouched; Alt still
+# reveals the menu on Linux.
+MENU_HIDE_FIND = b"new rs.BrowserWindow({...a.windowOptions,"
+MENU_HIDE_REPLACE = b"new rs.BrowserWindow({...a.windowOptions,autoHideMenuBar:!0,"
+# Graceful quit bridge: byte-exact vendor shape from the single-instance
+# lock line in the packed main-process bundle
+# (dist/electron-main/main-core.cjs, the only member containing it). An OS
+# SIGTERM currently kills Electron raw through the bundled signal-exit
+# helper, skipping vendor `before-quit` cleanup (including the detached
+# local-exec daemon shutdown). The appended listener converts SIGTERM into
+# graceful app.quit instead, so the existing quit path terminates the
+# daemon before the process exits.
+SIGTERM_QUIT_BRIDGE_FIND = b"ru||he.app.quit();"
+SIGTERM_QUIT_BRIDGE_REPLACE = (
+    b"ru||he.app.quit();process.on(\"SIGTERM\",()=>{he.app.quit()});"
+)
 PATCHES = (
     (NATIVE_FRAME_FIND, NATIVE_FRAME_REPLACE),
     (IN_CONTENT_CONTROLS_FIND, IN_CONTENT_CONTROLS_REPLACE),
+    (SECOND_INSTANCE_REVEAL_FIND, SECOND_INSTANCE_REVEAL_REPLACE),
+)
+# Anchor-preserving appends: the anchor FIND stays in the output inside its
+# REPLACE, so post-guards require the REPLACE present and the anchor
+# exactly once instead of requiring the anchor to vanish.
+EXTENSIONS = (
+    (CLOSE_INTERCEPT_FIND, CLOSE_INTERCEPT_REPLACE),
+    (QUIT_ARM_FIND, QUIT_ARM_REPLACE),
+    (MENU_HIDE_FIND, MENU_HIDE_REPLACE),
+    (SIGTERM_QUIT_BRIDGE_FIND, SIGTERM_QUIT_BRIDGE_REPLACE),
 )
 
 
@@ -39,14 +137,14 @@ class TransformError(RuntimeError):
     """The expected upstream ASAR pattern is missing or ambiguous."""
 
 
-def _require_same_length_patches(patches: Iterable[tuple[bytes, bytes]]) -> None:
-    for find, replace in patches:
-        if not find or find == replace:
-            raise TransformError("invalid patch: empty or unchanged pattern")
-        if len(find) != len(replace):
-            raise TransformError(
-                "invalid patch: replacements must keep ASAR member size"
-            )
+def _validate_patch_pair(find: bytes, replace: bytes) -> None:
+    if (
+        not isinstance(find, bytes)
+        or not isinstance(replace, bytes)
+        or not find
+        or find == replace
+    ):
+        raise TransformError("invalid patch: empty or unchanged pattern")
 
 
 def _walk_files(node: dict, prefix: str = "") -> list[tuple[str, dict]]:
@@ -212,60 +310,184 @@ def refresh_member_integrity(json_text: str, path: str, data: bytes) -> str:
     return json_text[:integrity_start] + new_text + json_text[integrity_end:]
 
 
-def apply_native_frame_patches(blob: bytes) -> bytes:
-    """Patch packed members in place. Fail if a pattern is absent or repeated."""
-    _require_same_length_patches(PATCHES)
-    header, json_start, json_len, data_offset = read_asar(blob)
-    members = _walk_files(header)
-    planned: list[tuple[str, dict, bytes, bytes]] = []
-    for find, replace in PATCHES:
-        hits: list[tuple[str, dict, int]] = []
-        for path, meta in members:
-            if meta.get("unpacked"):
-                continue
-            content = _member_bytes(blob, meta, data_offset)
-            count = content.count(find)
-            if count:
-                hits.append((path, meta, count))
-        if len(hits) != 1 or hits[0][2] != 1:
-            raise TransformError(
-                "expected exactly one ASAR occurrence of %r, found %s"
-                % (find, [(path, count) for path, _, count in hits])
-            )
-        planned.append((hits[0][0], hits[0][1], find, replace))
+def _updated_integrity(integrity: object, data: bytes) -> dict:
+    """Recompute hash/blocks for new member bytes, preserving key order."""
+    if not isinstance(integrity, dict):
+        raise TransformError("asar member integrity is missing")
+    if integrity.get("algorithm") != "SHA256":
+        raise TransformError("asar member integrity algorithm is not SHA256")
+    block_size = integrity.get("blockSize")
+    if type(block_size) is not int or block_size <= 0:
+        raise TransformError("asar member integrity blockSize is malformed")
+    updated: dict = {}
+    for key, value in integrity.items():
+        if key == "hash":
+            updated[key] = _sha256_hex(data)
+        elif key == "blocks":
+            updated[key] = _block_hashes(data, block_size)
+        else:
+            updated[key] = value
+    return updated
 
-    patched = bytearray(blob)
+
+def _rebuild_asar(
+    blob: bytes,
+    header: dict,
+    json_start: int,
+    json_len: int,
+    data_offset: int,
+    new_contents: dict[str, bytes],
+) -> bytes:
+    """Rebuild the archive with replaced member bytes.
+
+    Members keep their data order while offsets, sizes, and integrity
+    entries are rewritten by splicing only those value spans into the
+    original JSON header, so unpacked entries and unknown fields are
+    preserved byte for byte. Fail if the on-disk layout is unexpected.
+    """
+    members = _walk_files(header)
     json_text = blob[json_start : json_start + json_len].decode("utf-8")
-    touched: set[str] = set()
-    for path, meta, find, replace in planned:
+    edits: list[tuple[int, int, str]] = []
+    payload = bytearray()
+    cursor = data_offset
+    for path, meta in members:
+        if meta.get("unpacked"):
+            continue
         start = data_offset + int(meta["offset"])
         size = int(meta["size"])
-        original = bytes(patched[start : start + size])
-        if original.count(find) != 1:
-            raise TransformError("refusing to rewrite %s with a non-unique patch" % path)
-        updated = original.replace(find, replace, 1)
-        if len(updated) != size or find in updated:
-            raise TransformError("patch did not consume %r in %s" % (find, path))
-        patched[start : start + size] = updated
-        json_text = refresh_member_integrity(json_text, path, updated)
-        touched.add(path)
+        if start != cursor:
+            raise TransformError("unexpected asar data layout at %s" % path)
+        if path not in new_contents:
+            raise TransformError("missing rebuilt member %s" % path)
+        data = new_contents[path]
+        member_start, _member_end = _member_span(json_text, path)
+        new_offset = str(len(payload))
+        offset_start, offset_end = _value_span_for_key(
+            json_text, member_start, "offset"
+        )
+        if json_text[offset_start:offset_end] != json.dumps(meta["offset"]):
+            raise TransformError("unexpected asar offset encoding at %s" % path)
+        if new_offset != meta["offset"]:
+            edits.append((offset_start, offset_end, json.dumps(new_offset)))
+        if len(data) != size:
+            size_start, size_end = _value_span_for_key(
+                json_text, member_start, "size"
+            )
+            edits.append((size_start, size_end, json.dumps(len(data))))
+        original = _member_bytes(blob, meta, data_offset)
+        if data != original:
+            try:
+                integrity_start, integrity_end = _value_span_for_key(
+                    json_text, member_start, "integrity"
+                )
+            except TransformError as exc:
+                raise TransformError(
+                    "asar member integrity is missing"
+                ) from exc
+            updated = _updated_integrity(
+                json.loads(json_text[integrity_start:integrity_end]), data
+            )
+            edits.append(
+                (
+                    integrity_start,
+                    integrity_end,
+                    json.dumps(updated, separators=(",", ":")),
+                )
+            )
+        payload.extend(data)
+        cursor = start + size
 
+    for start, end, text in sorted(edits, reverse=True):
+        json_text = json_text[:start] + text + json_text[end:]
     encoded_json = json_text.encode("utf-8")
-    if len(encoded_json) != json_len:
-        raise TransformError("asar JSON header size changed")
-    patched[json_start : json_start + json_len] = encoded_json
+    string_payload = struct.pack("<I", len(encoded_json)) + encoded_json + b"\x00"
+    pad = (4 - (len(string_payload) % 4)) % 4
+    pickle_payload = string_payload + (b"\x00" * pad)
+    header_pickle = struct.pack("<I", len(pickle_payload)) + pickle_payload
+    header_size_pickle = struct.pack("<I", 4) + struct.pack(
+        "<I", len(header_pickle)
+    )
+    return header_size_pickle + header_pickle + bytes(payload)
 
-    result = bytes(patched)
-    if WINDOWS_WCO_MARK not in result or MAC_FRAME_MARK not in result:
-        raise TransformError("refusing to drop macOS/Windows window chrome")
-    if NATIVE_FRAME_FIND in result:
-        raise TransformError("Linux native-frame pattern is still present")
-    if IN_CONTENT_CONTROLS_FIND in result:
-        raise TransformError("Linux in-content control pattern is still present")
-    if NATIVE_FRAME_REPLACE not in result or IN_CONTENT_CONTROLS_REPLACE not in result:
-        raise TransformError("native-frame replacements are missing")
+
+def apply_transforms(
+    blob: bytes,
+    swaps: Iterable[tuple[bytes, bytes]],
+    extensions: Iterable[tuple[bytes, bytes]],
+) -> tuple[bytes, set[str]]:
+    """Apply swap and extension patches, rebuilding the archive as needed.
+
+    Every pattern must occur exactly once across packed members or the
+    transform fails closed. Member sizes may change; offsets, sizes, and
+    integrity entries are rewritten to match. Returns the rebuilt archive
+    and the set of touched member paths.
+    """
+    swap_list = list(swaps)
+    extension_list = list(extensions)
+    for find, replace in swap_list + extension_list:
+        _validate_patch_pair(find, replace)
+    header, json_start, json_len, data_offset = read_asar(blob)
+    contents: dict[str, bytes] = {}
+    for path, meta in _walk_files(header):
+        if meta.get("unpacked"):
+            continue
+        contents[path] = _member_bytes(blob, meta, data_offset)
+    touched: set[str] = set()
+
+    def locate(find: bytes) -> str:
+        hits = [
+            (path, content.count(find))
+            for path, content in contents.items()
+            if find in content
+        ]
+        if len(hits) != 1 or hits[0][1] != 1:
+            raise TransformError(
+                "expected exactly one ASAR occurrence of %r, found %s"
+                % (find, hits)
+            )
+        return hits[0][0]
+
+    for find, replace in swap_list:
+        path = locate(find)
+        updated = contents[path].replace(find, replace, 1)
+        if find in updated:
+            raise TransformError("patch did not consume %r in %s" % (find, path))
+        contents[path] = updated
+        touched.add(path)
+    for find, replace in extension_list:
+        path = locate(find)
+        updated = contents[path].replace(find, replace, 1)
+        if replace not in updated:
+            raise TransformError("patch did not apply %r in %s" % (replace, path))
+        contents[path] = updated
+        touched.add(path)
     if not touched:
         raise TransformError("no ASAR members were patched")
+    return (
+        _rebuild_asar(blob, header, json_start, json_len, data_offset, contents),
+        touched,
+    )
+
+
+def apply_native_frame_patches(blob: bytes) -> bytes:
+    """Patch packed members and rebuild the archive. Fail if a pattern is
+    absent or repeated."""
+    result, _touched = apply_transforms(blob, PATCHES, EXTENSIONS)
+
+    if WINDOWS_WCO_MARK not in result or MAC_FRAME_MARK not in result:
+        raise TransformError("refusing to drop macOS/Windows window chrome")
+    for find, replace in PATCHES:
+        if find in result:
+            raise TransformError("expected pattern is still present: %r" % (find,))
+        if replace not in result:
+            raise TransformError("expected replacement is missing: %r" % (replace,))
+    for find, replace in EXTENSIONS:
+        if replace not in result:
+            raise TransformError("expected replacement is missing: %r" % (replace,))
+        if result.count(find) != 1:
+            raise TransformError(
+                "expected anchor exactly once in output: %r" % (find,)
+            )
     return result
 
 
