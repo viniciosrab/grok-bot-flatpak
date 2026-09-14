@@ -2137,5 +2137,311 @@ class ShellHarnessContractTests(unittest.TestCase):
         self.assertIn("actions: read", permlines)
 
 
+class PublishGpgSignaturesContractTests(unittest.TestCase):
+    """Published commits must carry GPG signatures; the summary alone is not enough.
+
+    Regression seam for the signed-summary/unsigned-commit failure: the
+    public descriptor embeds GPGKey (so Flatpak enables commit
+    verification), but architecture jobs build without signing and the
+    release job only signed the summary. `flatpak install` then rejects
+    app commits with `GPG verification enabled, but no signatures
+    found`. The release job must sign every distinct ref commit with
+    `ostree gpg-sign` and prove each one verifies as a consumer using
+    only the exported public key, keeping verification mandatory and
+    the private key in the release job only.
+    """
+
+    def test_never_disables_gpg_verification(self):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        self.assertNotIn("--no-gpg-verify", text)
+        self.assertNotIn("gpg-verify=false", text)
+
+    def test_private_key_restricted_to_release_job(self):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        build_x86 = text.index("\n  build-x86_64:")
+        build_arm = text.index("\n  build-aarch64:", build_x86)
+        release = text.index("\n  release:", build_arm)
+        rollback = text.index("\n  rollback:", release)
+        for section in (
+            text[build_x86:build_arm],
+            text[build_arm:release],
+        ):
+            self.assertNotIn("secrets.GPG_KEY", section)
+            self.assertNotIn("GPG_KEY", section)
+            self.assertNotIn("gpg --import", section)
+            self.assertNotIn("gpg-sign", section)
+        self.assertIn("secrets.GPG_KEY", text[release:rollback])
+
+    def test_arch_build_jobs_do_not_sign(self):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        build_x86 = text.index("\n  build-x86_64:")
+        build_arm = text.index("\n  build-aarch64:", build_x86)
+        release = text.index("\n  release:", build_arm)
+        for section in (
+            text[build_x86:build_arm],
+            text[build_arm:release],
+        ):
+            self.assertIn(
+                "flatpak-builder --force-clean --repo=repo build-dir",
+                section,
+            )
+            self.assertNotIn("--gpg-sign", section)
+
+    def test_release_signs_every_commit_before_summary(self):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        self.assertIn("ostree gpg-sign --repo=site", text)
+        self.assertIn("ostree refs --repo=site", text)
+        self.assertIn("ostree rev-parse --repo=site", text)
+        self.assertIn("ostree.gpgsigs", text)
+        sign_idx = text.index("ostree gpg-sign --repo=site")
+        summary_idx = text.index(
+            'flatpak build-update-repo --prune --gpg-sign="${KEY_ID}" site'
+        )
+        self.assertLess(sign_idx, summary_idx)
+
+    def test_consumer_verification_after_summary_before_tar(self):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        self.assertIn("--gpg-import=", text)
+        self.assertIn("--commit-metadata-only", text)
+        self.assertIn("consumer verification failed for ref", text)
+        summary_idx = text.index(
+            'flatpak build-update-repo --prune --gpg-sign="${KEY_ID}" site'
+        )
+        export_idx = text.index('gpg --export "${KEY_ID}"')
+        verify_idx = text.index(
+            'ostree pull --repo="${VERIFY_REPO}" '
+            "--commit-metadata-only --depth=0"
+        )
+        tar_idx = text.index("tar -czf site.tar.gz site")
+        self.assertLess(summary_idx, export_idx)
+        self.assertLess(export_idx, verify_idx)
+        self.assertLess(verify_idx, tar_idx)
+
+    def test_workflow_ordering_pull_import_sign_summary_verify_package(
+        self,
+    ):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        first_pull = text.index(
+            "ostree pull-local --repo=site arch-repos/repo-x86_64"
+        )
+        second_pull = text.index(
+            "ostree pull-local --repo=site arch-repos/repo-aarch64"
+        )
+        key_import = text.index('printf \'%s\' "${GPG_KEY}" | gpg --import')
+        sign_commit = text.index("ostree gpg-sign --repo=site")
+        summary_sign = text.index(
+            'flatpak build-update-repo --prune --gpg-sign="${KEY_ID}" site'
+        )
+        verify_pull = text.index(
+            'ostree pull --repo="${VERIFY_REPO}" '
+            "--commit-metadata-only --depth=0"
+        )
+        package = text.index("tar -czf site.tar.gz site")
+        self.assertLess(first_pull, second_pull)
+        self.assertLess(second_pull, key_import)
+        self.assertLess(key_import, sign_commit)
+        self.assertLess(sign_commit, summary_sign)
+        self.assertLess(summary_sign, verify_pull)
+        self.assertLess(verify_pull, package)
+
+    def test_fail_closed_markers(self):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        for marker in (
+            "no refs in site repo",
+            "malformed commit ID",
+            "malformed ref",
+            "missing signatures for commit",
+            "consumer verification failed for ref",
+            "ambiguous GPG signing keys",
+            "no ref commits signed",
+            "no refs to verify",
+            "missing public key for consumer verification",
+            "exit 1",
+        ):
+            self.assertIn(marker, text)
+
+
+def require_ostree_gpg(testcase):
+    if shutil.which("ostree") is None or shutil.which("gpg") is None:
+        testcase.skipTest("ostree and gpg are required for GPG harness tests")
+    if shutil.which("bash") is None:
+        testcase.skipTest("bash is required for GPG harness tests")
+
+
+class PublishGpgHarnessContractTests(unittest.TestCase):
+    """Execute the ACTUAL publish.yml signing and verification blocks.
+
+    String assertions alone passed while the summary was signed and app
+    commits were not, so these tests run the verbatim workflow shell
+    against ephemeral OSTree repos with a throwaway GPG key and assert
+    real consumer behavior: metadata-only pulls with GPG verification
+    fail on unsigned commits and pass after `ostree gpg-sign`.
+    """
+
+    def make_throwaway_key(self, gnupghome):
+        os.makedirs(gnupghome, exist_ok=True)
+        os.chmod(gnupghome, 0o700)
+        batch = os.path.join(gnupghome, "batch")
+        with open(batch, "w", encoding="utf-8") as handle:
+            handle.write(
+                "%no-protection\n"
+                "Key-Type: RSA\n"
+                "Key-Length: 2048\n"
+                "Name-Real: Harness Test\n"
+                "Name-Email: harness@test.local\n"
+                "Expire-Date: 0\n"
+                "%commit\n"
+            )
+        env = dict(os.environ)
+        env["GNUPGHOME"] = gnupghome
+        proc = subprocess.run(
+            ["gpg", "--batch", "--generate-key", batch],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        proc = subprocess.run(
+            ["gpg", "--list-secret-keys", "--with-colons"],
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=60,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        key_id = ""
+        for line in proc.stdout.splitlines():
+            if line.startswith("sec:"):
+                key_id = line.split(":")[4]
+                break
+        self.assertTrue(key_id, "throwaway GPG key was not created")
+        return key_id
+
+    def make_site(self, parent):
+        site = os.path.join(parent, "site")
+        content_a = os.path.join(parent, "content-a")
+        content_b = os.path.join(parent, "content-b")
+        content_debug = os.path.join(parent, "content-debug")
+        os.makedirs(content_a, exist_ok=True)
+        os.makedirs(content_b, exist_ok=True)
+        os.makedirs(content_debug, exist_ok=True)
+        with open(os.path.join(content_a, "file.txt"), "w",
+                  encoding="utf-8") as handle:
+            handle.write("harness x86_64\n")
+        with open(os.path.join(content_b, "file.txt"), "w",
+                  encoding="utf-8") as handle:
+            handle.write("harness aarch64\n")
+        with open(os.path.join(content_debug, "file.txt"), "w",
+                  encoding="utf-8") as handle:
+            handle.write("harness x86_64 debug\n")
+        for argv in (
+            ["ostree", "init", f"--repo={site}", "--mode=archive"],
+            ["ostree", "commit", f"--repo={site}",
+             "--branch=app/org.example.App/x86_64/stable",
+             "-m", "harness", content_a],
+            ["ostree", "commit", f"--repo={site}",
+             "--branch=app/org.example.App/aarch64/stable",
+             "-m", "harness", content_b],
+            ["ostree", "commit", f"--repo={site}",
+             "--branch=app/org.example.App/x86_64/debug",
+             "-m", "harness", content_debug],
+        ):
+            proc = subprocess.run(
+                argv, capture_output=True, text=True, timeout=60
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+        return site
+
+    def run_sign_block(self, workdir, key_id, gnupghome):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        block = extract_verbatim_block(
+            text,
+            "# BEGIN sign every published commit",
+            "# END sign every published commit.",
+        )
+        script = (
+            "set -euo pipefail\n"
+            f'cd "{workdir}"\n'
+            + block
+            + 'echo "HARNESS_SIGNED=PASS"\n'
+        )
+        env = dict(os.environ)
+        env["KEY_ID"] = key_id
+        env["GNUPGHOME"] = gnupghome
+        return run_harness(script, env=env)
+
+    def run_verify_block(self, workdir, pubkey):
+        text = read_repo_text(PUBLISH_WORKFLOW_PATH)
+        block = extract_verbatim_block(
+            text,
+            "# BEGIN consumer commit verification",
+            "# END consumer commit verification.",
+        )
+        script = (
+            "set -euo pipefail\n"
+            f'cd "{workdir}"\n'
+            + block
+            + 'echo "HARNESS_VERIFIED=PASS"\n'
+        )
+        env = dict(os.environ)
+        env["PUBKEY"] = pubkey
+        return run_harness(script, env=env)
+
+    def test_verbatim_sign_and_verify_go_red_then_green(self):
+        require_ostree_gpg(self)
+        tmp = tempfile.mkdtemp(prefix="publish-gpg-harness-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        gnupghome = os.path.join(tmp, "gnupg")
+        key_id = self.make_throwaway_key(gnupghome)
+        workdir = os.path.join(tmp, "work")
+        os.makedirs(workdir, exist_ok=True)
+        site = self.make_site(workdir)
+        self.assertTrue(os.path.isdir(site))
+        env = dict(os.environ)
+        env["GNUPGHOME"] = gnupghome
+        proc = subprocess.run(
+            ["gpg", "--export", key_id],
+            capture_output=True, env=env, timeout=60,
+        )
+        self.assertEqual(proc.returncode, 0)
+        pubkey = os.path.join(tmp, "pub.gpg")
+        with open(pubkey, "wb") as handle:
+            handle.write(proc.stdout)
+        self.assertTrue(os.path.getsize(pubkey) > 0)
+        # RED: unsigned commits fail consumer verification with the
+        # exact Flatpak symptom, using only the exported public key.
+        red = self.run_verify_block(workdir, pubkey)
+        self.assertNotEqual(red.returncode, 0)
+        combined = (red.stdout or "") + (red.stderr or "")
+        self.assertIn("no signatures found", combined)
+        self.assertIn("consumer verification failed for ref", combined)
+        # Sign every distinct ref commit, then verification passes.
+        signed = self.run_sign_block(workdir, key_id, gnupghome)
+        self.assertEqual(signed.returncode, 0, signed.stderr)
+        self.assertIn("HARNESS_SIGNED=PASS", signed.stdout)
+        green = self.run_verify_block(workdir, pubkey)
+        self.assertEqual(green.returncode, 0, green.stderr)
+        self.assertIn("HARNESS_VERIFIED=PASS", green.stdout)
+
+    def test_verbatim_sign_fails_closed_on_no_refs(self):
+        require_ostree_gpg(self)
+        tmp = tempfile.mkdtemp(prefix="publish-gpg-empty-")
+        self.addCleanup(shutil.rmtree, tmp, True)
+        gnupghome = os.path.join(tmp, "gnupg")
+        key_id = self.make_throwaway_key(gnupghome)
+        workdir = os.path.join(tmp, "work")
+        os.makedirs(workdir, exist_ok=True)
+        proc = subprocess.run(
+            ["ostree", "init", f"--repo={os.path.join(workdir, 'site')}",
+             "--mode=archive"],
+            capture_output=True, text=True, timeout=60,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        failed = self.run_sign_block(workdir, key_id, gnupghome)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("no refs", (failed.stdout or "") + (failed.stderr or ""))
+
+
 if __name__ == "__main__":
     unittest.main()
