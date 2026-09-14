@@ -6,9 +6,13 @@
 //   is absent it exits nonzero; there is no trayless fallback.
 // - Show relaunches the application when it is not running, or reveals the
 //   running instance through a second exec (Electron single-instance
-//   focuses the existing window).
-// - Quit terminates the whole child process group and then quits the
-//   companion, so both processes always go down together.
+//   focuses the existing window). A live Electron singleton still counts
+//   as running after a hardware-acceleration relaunch even if m_child has
+//   exited, so Show uses second-exec/startDetached instead of startChild.
+// - Quit terminates the tracked child process group, or a live untracked
+//   singleton (Linux SO_PEERCRED on the existing socket), then quits the
+//   companion. It never kills by executable name and never signals the
+//   companion's own process group.
 // - When Grok Bot exits on its own the companion stays up, so the next
 //   Show relaunches it.
 //
@@ -33,13 +37,15 @@
 #include <QStringList>
 #include <QTimer>
 #include <KStatusNotifierItem>
+#include <sys/types.h>
 
 #ifdef Q_OS_UNIX
 #include <cerrno>
+#include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <sys/types.h>
 #include <sys/un.h>
 #include <unistd.h>
 #endif
@@ -54,6 +60,7 @@ constexpr char kElectronUserDataDirName[] = "Grok Bot";
 constexpr char kElectronSingletonSocketName[] = "SingletonSocket";
 constexpr int kColdProtocolSocketPollMs = 50;
 constexpr int kColdProtocolReadyTimeoutMs = 15000;
+constexpr int kUnixSocketConnectTimeoutMs = 50;
 // Tray Quit drains Electron gracefully first: vendor `before-quit` cleanup
 // shuts down the detached local-exec daemon (SIGTERM, 4s wait, SIGKILL),
 // so the companion signals only the tracked leader and waits for the whole
@@ -89,42 +96,166 @@ QString resolvedSymlinkPath(const QString &linkPath)
 #endif
 }
 
-bool unixSocketIsLive(const QString &socketPath)
+QString liveElectronSocketPath()
+{
+    const QString socketPath = electronSingletonSocketPath();
+    const QFileInfo info(socketPath);
+    if (info.isSymLink()) {
+        return resolvedSymlinkPath(socketPath);
+    }
+    if (info.exists()) {
+        return info.absoluteFilePath();
+    }
+    return QString();
+}
+
+int connectUnixSocket(const QString &socketPath)
 {
 #ifdef Q_OS_UNIX
-    // Probe liveness only: connect and close. Do not write protocol bytes.
+    // Connect only: callers must close the fd. Do not write protocol bytes.
     const QByteArray encoded = QFile::encodeName(socketPath);
     sockaddr_un addr{};
     if (encoded.isEmpty() || static_cast<size_t>(encoded.size()) >= sizeof(addr.sun_path)) {
-        return false;
+        return -1;
     }
 
+#ifdef SOCK_NONBLOCK
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+#else
     const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+#endif
     if (fd < 0) {
-        return false;
+        return -1;
     }
+#ifndef SOCK_NONBLOCK
+    const int flags = ::fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+        ::close(fd);
+        return -1;
+    }
+#endif
 
     addr.sun_family = AF_UNIX;
     ::memcpy(addr.sun_path, encoded.constData(), static_cast<size_t>(encoded.size()));
 
-    const int rc = ::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr));
-    ::close(fd);
-    return rc == 0;
+    QElapsedTimer clock;
+    clock.start();
+    for (;;) {
+        if (::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == 0) {
+            return fd;
+        }
+        const int connectErr = errno;
+        if (connectErr == EINTR) {
+            if (clock.hasExpired(kUnixSocketConnectTimeoutMs)) {
+                ::close(fd);
+                return -1;
+            }
+            continue;
+        }
+        if (connectErr == EINPROGRESS || connectErr == EALREADY) {
+            for (;;) {
+                const qint64 remaining = kUnixSocketConnectTimeoutMs - clock.elapsed();
+                if (remaining <= 0) {
+                    ::close(fd);
+                    return -1;
+                }
+                pollfd ready{};
+                ready.fd = fd;
+                ready.events = POLLOUT;
+                const int pollRc = ::poll(&ready, 1, static_cast<int>(remaining));
+                if (pollRc < 0) {
+                    if (errno == EINTR) {
+                        continue;
+                    }
+                    ::close(fd);
+                    return -1;
+                }
+                if (pollRc == 0) {
+                    ::close(fd);
+                    return -1;
+                }
+                int soError = 0;
+                socklen_t soLen = sizeof(soError);
+                if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &soError, &soLen) != 0
+                    || soError != 0) {
+                    ::close(fd);
+                    return -1;
+                }
+                return fd;
+            }
+        }
+        if (connectErr == EAGAIN || connectErr == EWOULDBLOCK) {
+            const qint64 remaining = kUnixSocketConnectTimeoutMs - clock.elapsed();
+            if (remaining <= 0) {
+                ::close(fd);
+                return -1;
+            }
+            pollfd waiter{};
+            waiter.fd = -1;
+            const int waitRc = ::poll(&waiter, 1, static_cast<int>(remaining));
+            if (waitRc < 0 && errno != EINTR) {
+                ::close(fd);
+                return -1;
+            }
+            if (clock.hasExpired(kUnixSocketConnectTimeoutMs)) {
+                ::close(fd);
+                return -1;
+            }
+            continue;
+        }
+        ::close(fd);
+        return -1;
+    }
 #else
     Q_UNUSED(socketPath);
-    return false;
+    return -1;
+#endif
+}
+
+bool unixSocketIsLive(const QString &socketPath)
+{
+    const int fd = connectUnixSocket(socketPath);
+    if (fd < 0) {
+        return false;
+    }
+#ifdef Q_OS_UNIX
+    ::close(fd);
+#endif
+    return true;
+}
+
+pid_t linuxPeerPid(const QString &socketPath)
+{
+#if defined(Q_OS_UNIX) && defined(__linux__)
+#ifndef SO_PEERCRED
+#define SO_PEERCRED 17
+#endif
+    const int fd = connectUnixSocket(socketPath);
+    if (fd < 0) {
+        return 0;
+    }
+    struct {
+        pid_t pid;
+        uid_t uid;
+        gid_t gid;
+    } cred{};
+    socklen_t len = sizeof(cred);
+    const int rc = ::getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len);
+    ::close(fd);
+    if (rc != 0 || cred.pid <= 1) {
+        return 0;
+    }
+    return cred.pid;
+#else
+    Q_UNUSED(socketPath);
+    return 0;
 #endif
 }
 
 bool electronSingleInstanceReady()
 {
-    const QString socketPath = electronSingletonSocketPath();
-    const QFileInfo info(socketPath);
-    if (info.isSymLink()) {
-        const QString target = resolvedSymlinkPath(socketPath);
-        return !target.isEmpty() && unixSocketIsLive(target);
-    }
-    return info.exists() && unixSocketIsLive(info.absoluteFilePath());
+    const QString target = liveElectronSocketPath();
+    return !target.isEmpty() && unixSocketIsLive(target);
 }
 
 bool watcherAvailable()
@@ -221,7 +352,10 @@ public:
 private slots:
     void showRequested()
     {
-        if (m_child->state() != QProcess::NotRunning) {
+        // A hardware-acceleration relaunch leaves m_child NotRunning while
+        // the new Electron singleton is still live. Treat that socket as the
+        // running instance so Show focuses instead of spawning a tracked child.
+        if (m_child->state() != QProcess::NotRunning || electronSingleInstanceReady()) {
             // Second exec: Electron single-instance focuses the window.
             if (!QProcess::startDetached(m_electronCommand, {})) {
                 qWarning("grok-bot-companion: failed to reveal the running instance: %s", qPrintable(m_electronCommand));
@@ -233,7 +367,11 @@ private slots:
 
     void quitRequested()
     {
-        terminateChildGroup();
+        if (m_child->state() != QProcess::NotRunning) {
+            terminateChildGroup();
+        } else {
+            terminateUntrackedElectron();
+        }
         qApp->quit();
     }
 
@@ -381,6 +519,67 @@ private:
                 m_child->waitForFinished(3000);
             }
         }
+    }
+
+    bool waitForPidExit(pid_t pid, int timeoutMs)
+    {
+        QElapsedTimer clock;
+        clock.start();
+        for (;;) {
+            errno = 0;
+            if (::kill(pid, 0) != 0 && errno == ESRCH) {
+                return true;
+            }
+            if (clock.hasExpired(timeoutMs)) {
+                break;
+            }
+            ::usleep(static_cast<useconds_t>(kGroupPollSliceMs) * 1000U);
+        }
+        errno = 0;
+        return ::kill(pid, 0) != 0 && errno == ESRCH;
+    }
+
+    // Hardware-acceleration relaunch starts a new Electron that is not
+    // m_child. Read the live singleton's pid via SO_PEERCRED and ask that
+    // process to quit gracefully. Never match by executable name; never
+    // signal the companion's own process group.
+    void terminateUntrackedElectron()
+    {
+#ifdef Q_OS_UNIX
+        if (!electronSingleInstanceReady()) {
+            return;
+        }
+        const pid_t pid = linuxPeerPid(liveElectronSocketPath());
+        if (pid <= 1 || pid == ::getpid()) {
+            qWarning("grok-bot-companion: live Electron singleton pid is unusable");
+            return;
+        }
+        const pid_t pgid = ::getpgid(pid);
+        if (pgid < 1 || pgid == ::getpgrp()) {
+            qWarning("grok-bot-companion: refusing to signal the companion process group");
+            return;
+        }
+        errno = 0;
+        if (::kill(pid, SIGTERM) != 0 && errno != ESRCH) {
+            qWarning("grok-bot-companion: failed to request graceful Electron quit");
+        }
+        if (waitForPidExit(pid, kGracefulQuitTimeoutMs)) {
+            return;
+        }
+        qWarning("grok-bot-companion: untracked graceful quit timed out; forcing shutdown");
+        if (pgid == pid) {
+            ::killpg(pgid, SIGTERM);
+            if (!waitForProcessGroupExit(pgid, kForceShutdownTimeoutMs)) {
+                ::killpg(pgid, SIGKILL);
+                waitForProcessGroupExit(pgid, kForceShutdownTimeoutMs);
+            }
+            return;
+        }
+        if (::kill(pid, SIGKILL) != 0 && errno != ESRCH) {
+            qWarning("grok-bot-companion: failed to force-quit untracked Electron");
+        }
+        waitForPidExit(pid, kForceShutdownTimeoutMs);
+#endif
     }
 
     KStatusNotifierItem *m_tray;
