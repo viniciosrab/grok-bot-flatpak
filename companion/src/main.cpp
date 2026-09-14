@@ -41,6 +41,8 @@
 
 #ifdef Q_OS_UNIX
 #include <cerrno>
+#include <fcntl.h>
+#include <poll.h>
 #include <signal.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -58,6 +60,7 @@ constexpr char kElectronUserDataDirName[] = "Grok Bot";
 constexpr char kElectronSingletonSocketName[] = "SingletonSocket";
 constexpr int kColdProtocolSocketPollMs = 50;
 constexpr int kColdProtocolReadyTimeoutMs = 15000;
+constexpr int kUnixSocketConnectTimeoutMs = 50;
 // Tray Quit drains Electron gracefully first: vendor `before-quit` cleanup
 // shuts down the detached local-exec daemon (SIGTERM, 4s wait, SIGKILL),
 // so the companion signals only the tracked leader and waits for the whole
@@ -116,19 +119,93 @@ int connectUnixSocket(const QString &socketPath)
         return -1;
     }
 
+#ifdef SOCK_NONBLOCK
+    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
+#else
     const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+#endif
     if (fd < 0) {
         return -1;
     }
+#ifndef SOCK_NONBLOCK
+    const int flags = ::fcntl(fd, F_GETFL, 0);
+    if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
+        ::close(fd);
+        return -1;
+    }
+#endif
 
     addr.sun_family = AF_UNIX;
     ::memcpy(addr.sun_path, encoded.constData(), static_cast<size_t>(encoded.size()));
 
-    if (::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) != 0) {
+    QElapsedTimer clock;
+    clock.start();
+    for (;;) {
+        if (::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == 0) {
+            return fd;
+        }
+        const int connectErr = errno;
+        if (connectErr == EINTR) {
+            if (clock.hasExpired(kUnixSocketConnectTimeoutMs)) {
+                ::close(fd);
+                return -1;
+            }
+            continue;
+        }
+        if (connectErr == EINPROGRESS || connectErr == EALREADY) {
+            for (;;) {
+                const qint64 remaining = kUnixSocketConnectTimeoutMs - clock.elapsed();
+                if (remaining <= 0) {
+                    ::close(fd);
+                    return -1;
+                }
+                pollfd ready{};
+                ready.fd = fd;
+                ready.events = POLLOUT;
+                const int pollRc = ::poll(&ready, 1, static_cast<int>(remaining));
+                if (pollRc < 0) {
+                    if (errno == EINTR) {
+                        continue;
+                    }
+                    ::close(fd);
+                    return -1;
+                }
+                if (pollRc == 0) {
+                    ::close(fd);
+                    return -1;
+                }
+                int soError = 0;
+                socklen_t soLen = sizeof(soError);
+                if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &soError, &soLen) != 0
+                    || soError != 0) {
+                    ::close(fd);
+                    return -1;
+                }
+                return fd;
+            }
+        }
+        if (connectErr == EAGAIN || connectErr == EWOULDBLOCK) {
+            const qint64 remaining = kUnixSocketConnectTimeoutMs - clock.elapsed();
+            if (remaining <= 0) {
+                ::close(fd);
+                return -1;
+            }
+            pollfd waiter{};
+            waiter.fd = -1;
+            const int waitRc = ::poll(&waiter, 1, static_cast<int>(remaining));
+            if (waitRc < 0 && errno != EINTR) {
+                ::close(fd);
+                return -1;
+            }
+            if (clock.hasExpired(kUnixSocketConnectTimeoutMs)) {
+                ::close(fd);
+                return -1;
+            }
+            continue;
+        }
         ::close(fd);
         return -1;
     }
-    return fd;
 #else
     Q_UNUSED(socketPath);
     return -1;

@@ -1284,6 +1284,42 @@ class UntrackedSingletonContractTests(unittest.TestCase):
         for forbidden in ("pkill", "pidof", "pgrep", "killall", "/proc/"):
             self.assertNotIn(forbidden, companion_src)
 
+    def test_connect_unix_socket_is_nonblocking_and_bounded(self):
+        companion_src = read_repo_text(COMPANION_SRC)
+        body = companion_src[
+            companion_src.index("int connectUnixSocket(") : companion_src.index(
+                "bool unixSocketIsLive("
+            )
+        ]
+        timeout_match = re.search(
+            r"kUnixSocketConnectTimeoutMs = (\d+)", companion_src
+        )
+        self.assertIsNotNone(timeout_match)
+        timeout = int(timeout_match.group(1))
+        self.assertGreaterEqual(timeout, 10)
+        self.assertLessEqual(timeout, 200)
+        self.assertIn("kUnixSocketConnectTimeoutMs", body)
+        self.assertTrue(
+            "SOCK_NONBLOCK" in body or "O_NONBLOCK" in body,
+            "connectUnixSocket must use SOCK_NONBLOCK or fcntl O_NONBLOCK",
+        )
+        self.assertIn("::poll(", body)
+        self.assertIn("SO_ERROR", body)
+        self.assertIn("EINPROGRESS", body)
+        self.assertIn("EALREADY", body)
+        self.assertIn("EAGAIN", body)
+        self.assertIn("EINTR", body)
+        self.assertIn("::close(fd)", body)
+        self.assertIn("#ifdef Q_OS_UNIX", body)
+        self.assertGreaterEqual(body.count("return fd;"), 2)
+        self.assertIn("F_GETFL", body)
+        self.assertIn("F_SETFL", body)
+        self.assertIn("O_NONBLOCK", body)
+        self.assertNotIn("write(", body)
+        self.assertNotIn("send(", body)
+        self.assertNotIn("sendmsg", body)
+        self.assertIn("#include <poll.h>", companion_src)
+
 
 class ZypakSubmoduleContractTests(unittest.TestCase):
     """Pinned zypak uses automatic submodule checkout, never a nickle overlay."""
