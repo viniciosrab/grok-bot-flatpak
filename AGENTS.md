@@ -1,6 +1,6 @@
 # Unofficial Grok Bot Flatpak — agent notes
 
-This repo packages Cursor's Grok Bot AppImage as `io.github.viniciosrab.GrokBot` (KDE Platform/SDK 6.11, zypak module, KF6 tray companion). It is unofficial. Executable contracts live in `tests/`, the manifest, and `.github/workflows/`; do not trust stale `openspec/config.yaml` context, README links to missing `CONTEXT.md`/`docs/adr/`, or generic Electron BaseApp recipes.
+This repo packages Cursor's Grok Bot AppImage as `io.github.viniciosrab.GrokBot` (KDE Platform/SDK 6.11, zypak module, KF6 tray companion). It is unofficial. Executable contracts live in `tests/`, the manifest, and `.github/workflows/`; do not trust stale `openspec/config.yaml` context or generic Electron BaseApp recipes.
 
 ## Quick path
 
@@ -15,23 +15,23 @@ This repo packages Cursor's Grok Bot AppImage as `io.github.viniciosrab.GrokBot`
 | Workspace gate | `python3 tools/test.py` | Companion stays off (`GROK_BOT_BUILD_COMPANION` defaults OFF). |
 | Companion locally | `cmake -S . -B build -DGROK_BOT_BUILD_COMPANION=ON` | Needs Qt6 Widgets/DBus, KF6StatusNotifierItem, KF6WindowSystem. Not required for the gate. |
 | Payload build | `flatpak-builder --force-clean --repo=repo build-dir io.github.viniciosrab.GrokBot.yml` | Needs Flathub `org.kde.Platform//6.11` and `org.kde.Sdk//6.11`. Dual-arch: `x86_64` and `aarch64`. |
-| X3 proof | `bash tools/prove_x3.sh` | Repo root, `build-dir` already present. Hosted KDE: Xvfb, real `plasmashell`, `kactivitymanagerd`, GetNameOwner of `org.kde.StatusNotifierWatcher`. Expensive; not a local default. |
+| X3 proof | `bash tools/prove_x3.sh` | Repo root, `build-dir` already present. Hosted KDE: Xvfb, real `plasmashell`, `kded5`, `kactivitymanagerd`, GetNameOwner of `org.kde.StatusNotifierWatcher`. Expensive; not a local default. |
 
-No repo linter, formatter, typechecker, or codegen. `scripts/` is empty.
+No repo linter, formatter, typechecker, codegen, or `scripts/` directory.
 
 ## Boundaries
 
 | Path | Role |
 |------|------|
 | `io.github.viniciosrab.GrokBot.yml` | Packaged Payload. `command: grok-bot-companion`. Never `base: org.electronjs.Electron2.BaseApp`. |
-| `companion/src/main.cpp` | Mandatory KF6 `KStatusNotifierItem`. Exit 1 if the watcher is missing. No trayless fallback. |
+| `companion/src/main.cpp` | Mandatory KF6 `KStatusNotifierItem`. Exit 1 if the watcher is missing. No trayless fallback. Owns hide/show, protocol forwarding, tracked-child graceful shutdown, and relaunched-singleton Show/Quit via Linux `SO_PEERCRED`; never kill by executable name. |
 | `data/pins.yml` | Source Checksum pins. Rewritten by the pin job; do not edit by hand. |
 | `data/io.github.viniciosrab.GrokBot.desktop` | `Exec=/app/bin/grok-bot-companion %u`. `MimeType=x-scheme-handler/grokbot;x-scheme-handler/sand;`. |
 | `tools/test.py` | Single workspace entry. |
 | `tools/prove_x3.sh` | Shared dual-arch X3 script. |
-| `tools/patch_electron_native_frame.py` | Fail-closed packed `app.asar` transform: Linux native frame (`frame: true`, default `titleBarStyle`, no `titleBarOverlay`) and no in-content min/max/close widget. |
+| `tools/patch_electron_native_frame.py` | Fail-closed packed `app.asar` transform: Linux native frame, no in-content window controls, close-to-tray, hidden native menu, second-instance reveal, graceful `SIGTERM` bridge, and hardware-acceleration relaunch via `app.relaunch()` + `app.exit()`. |
 
-Desktop `Exec` may include `%u`; CI greps `^Exec=/app/bin/grok-bot-companion( %u)?$`. Electron wrapper is `/app/bin/grok-bot-electron` (`zypak-wrapper`, `CHROME_DESKTOP=io.github.viniciosrab.GrokBot.desktop`, `--password-store=basic`).
+Desktop `Exec` may include `%u`; CI greps `^Exec=/app/bin/grok-bot-companion( %u)?$`. Electron wrapper is `/app/bin/grok-bot-electron` (`zypak-wrapper`, `CHROME_DESKTOP=io.github.viniciosrab.GrokBot.desktop`, `--password-store=basic`). It exports absolute `SAND_DATA_ROOT=${XDG_DATA_HOME}/grok-bot` before exec (fallback `${HOME}/.local/share/grok-bot`) so vendor settings persist in private Flatpak storage and relaunch inherits the same root. Keep this in the wrapper, never as a finish-arg or host-home permission, and never restore inaccessible `${HOME}/.grokbot`.
 
 ## Do not
 
@@ -42,7 +42,7 @@ Desktop `Exec` may include `%u`; CI greps `^Exec=/app/bin/grok-bot-companion( %u
 - Scrape `x.ai/bot`. Pins come only from the two sand feeds in `data/pins.yml` / `pin.yml`.
 - Treat validate's headless watcher step as X3. It **must** fail with exit 1 and `StatusNotifierWatcher` in the log (`QT_QPA_PLATFORM=offscreen`). Positive X3 is only `.github/workflows/x3.yml`.
 - Hand-edit `data/pins.yml`. Pin commits may touch only `data/pins.yml`, `io.github.viniciosrab.GrokBot.yml`, and `data/io.github.viniciosrab.GrokBot.metainfo.xml`.
-- Commit `build-dir/`, `repo/`, `.atl/`, `.codegraph/`, or `__pycache__/`.
+- Commit `build-dir/`, `.flatpak-builder/`, `repo/`, `.atl/`, `.codegraph/`, or `__pycache__/`. `build-dir/` and `.flatpak-builder/` are not currently protected by `.gitignore`, so check them explicitly.
 
 Finish-args are a closed set: ipc, wayland, fallback-x11, pulseaudio, network, dri, `talk-name=org.kde.StatusNotifierWatcher`, `SAND_DISABLE_UPDATES=1`, `ELECTRON_TRASH=gio`, `XCURSOR_PATH=...`.
 
@@ -54,6 +54,6 @@ Publish merges both arch OSTree repos, recreates empty `refs/remotes` (GitHub ar
 
 ## Protocol and lock
 
-`grokbot:` and `sand:` URLs must reach Electron. A second companion instance that loses `grok-bot-companion.lock` still forwards those URLs and exits 0.
+`grokbot:` and `sand:` URLs must reach Electron. A second companion instance that loses `grok-bot-companion.lock` still forwards those URLs and exits 0. Cold-start delivery waits for Electron's singleton socket before forwarding. A hardware-acceleration relaunch leaves the new Electron outside the companion's tracked `QProcess`; Show must second-exec that live singleton, and tray Quit must identify it through the socket peer credentials, request graceful shutdown, and retain bounded fallback behavior.
 
 Taskbar/window icon: vendor `resources/icon.png` (rounded-edge artwork used by the tray) with 10/11 inner artwork on a transparent canvas (~91%, KDE-like 20/22 padding). Scale that source to app-id hicolor (`16 24 32 48 64 128 256 512`) with SDK ffmpeg `inner=$((size*10/11)); scale=${inner}:${inner}:flags=lanczos,pad=${size}:${size}:(ow-iw)/2:(oh-ih)/2:color=0x00000000`; require ffmpeg; not 8/11 and not unpadded full-canvas. After those app-id icons exist, overwrite vendor-named `grok-bot.png` at each exported hicolor size (and under `/app/grok-bot/usr/share/icons/hicolor` when present) with the same padded bytes, because `StartupWMClass=grok-bot` makes Plasma look up those names. After preserve, ffmpeg padded 1024 (`inner=$((1024*10/11))`, `pad=1024:1024`) into `/app/grok-bot/resources/icon.png` and `/app/grok-bot/grok-bot.png`. Tray icon: preserved `/app/grok-bot/resources/icon.upstream.png` with the established 16-on-22 canvas. Do not apply the tray canvas to the taskbar, and do not send opaque vendor hicolor `grok-bot.png` to taskbar/window/app-id.
