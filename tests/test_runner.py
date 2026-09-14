@@ -550,6 +550,51 @@ def check_native_kde_frame_transform(manifest_text):
     return wrapper in manifest_text
 
 
+def check_graceful_quit_first(companion_src):
+    """Tray Quit must ask Electron to quit gracefully before forcing.
+
+    The companion signals only the tracked leader so vendor `before-quit`
+    cleanup (detached daemon shutdown) runs, polls the whole group empty
+    with a zero-signal probe, and keeps a bounded forced process-group
+    fallback when the group hangs. It never kills by executable name and
+    never signals its own process group.
+    """
+    for required in (
+        "requestGracefulElectronQuit",
+        "waitForProcessGroupExit",
+        "kGracefulQuitTimeoutMs",
+        "kForceShutdownTimeoutMs",
+        "::kill(",
+        "SIGTERM",
+        "ESRCH",
+        "getpgid",
+        "getpgrp",
+        "pgid != ::getpgrp()",
+        "qApp->quit()",
+    ):
+        if required not in companion_src:
+            return False
+    for forbidden in ("pkill", "pidof", "pgrep", "killall", "/proc/"):
+        if forbidden in companion_src:
+            return False
+    try:
+        graceful = int(
+            re.search(r"kGracefulQuitTimeoutMs = (\d+)", companion_src).group(1)
+        )
+        forced = int(
+            re.search(r"kForceShutdownTimeoutMs = (\d+)", companion_src).group(1)
+        )
+    except (AttributeError, ValueError):
+        return False
+    if not 4000 <= graceful <= 15000:
+        return False
+    if not 1000 <= forced <= 5000:
+        return False
+    leader_signal = companion_src.index("::kill(")
+    fallback = companion_src.index("::killpg(pgid, SIGTERM)")
+    return leader_signal < fallback
+
+
 def payload_checks(manifest_text, desktop_text, companion_src):
     """Every payload/runtime requirement for one architecture."""
     return {
@@ -975,6 +1020,61 @@ class ProtocolHandoffContractTests(unittest.TestCase):
                 desktop,
             )
         )
+
+
+class GracefulQuitContractTests(unittest.TestCase):
+    """Tray Quit drains Electron gracefully so no daemon outlives the app.
+
+    Regression seam for orphaned detached children: quitting used to
+    killpg(SIGTERM) the Electron group first, which killed Electron raw
+    and skipped vendor `before-quit` daemon cleanup while the detached
+    daemon (own session) survived.
+    """
+
+    def test_graceful_quit_first_helper_accepts(self):
+        companion_src = read_repo_text(COMPANION_SRC)
+        self.assertTrue(check_graceful_quit_first(companion_src))
+
+    def test_quit_signals_leader_before_group_and_stays_bounded(self):
+        companion_src = read_repo_text(COMPANION_SRC)
+        graceful = int(
+            re.search(r"kGracefulQuitTimeoutMs = (\d+)", companion_src).group(1)
+        )
+        forced = int(
+            re.search(r"kForceShutdownTimeoutMs = (\d+)", companion_src).group(1)
+        )
+        self.assertGreaterEqual(graceful, 4000)
+        self.assertLessEqual(graceful, 15000)
+        self.assertGreaterEqual(forced, 1000)
+        self.assertLessEqual(forced, 5000)
+        for required in (
+            "requestGracefulElectronQuit",
+            "waitForProcessGroupExit",
+            "::kill(",
+            "ESRCH",
+        ):
+            self.assertIn(required, companion_src)
+        self.assertLess(
+            companion_src.index("::kill("),
+            companion_src.index("::killpg(pgid, SIGTERM)"),
+        )
+        self.assertLess(
+            companion_src.index("requestGracefulElectronQuit"),
+            companion_src.index("::killpg(pgid, SIGTERM)"),
+        )
+
+    def test_quit_never_kills_by_name_or_signals_own_group(self):
+        companion_src = read_repo_text(COMPANION_SRC)
+        for forbidden in ("pkill", "pidof", "pgrep", "killall", "/proc/"):
+            self.assertNotIn(forbidden, companion_src)
+        for required in (
+            "getpgid",
+            "getpgrp",
+            "pgid != ::getpgrp()",
+            "waitForStarted",
+            "qApp->quit()",
+        ):
+            self.assertIn(required, companion_src)
 
 
 class ZypakSubmoduleContractTests(unittest.TestCase):
