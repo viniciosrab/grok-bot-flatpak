@@ -10,9 +10,10 @@ Covers the design threat matrix for the pin boundary:
   rejected.
 * A same-version repin preserves the metainfo release date (no date
   churn); only a genuinely new upstream version stamps the runner UTC date.
-* Automated approval targets only the exact pin PR after OPEN/head/base/
-  author identity checks, running as github.token while the App token keeps
-  branch push, PR creation, and auto-merge. Identity validation precedes
+* Automated approval targets only the exact pin PR at the exact pin commit
+  captured by the current run after OPEN/head/base/author/head-OID checks,
+  running as github.token while the App token keeps branch push, PR creation,
+  and commit-bound auto-merge. Identity validation precedes
   every mutation in both token contexts, and PR creation pins --base main.
 
 Pure helpers are unit-tested with hostile fixtures. Repo-content tests
@@ -264,11 +265,13 @@ def gh_pr_create_has_head(argv: list) -> bool:
 
 
 def gh_pr_merge_is_exact_auto_squash(argv: list) -> bool:
-    """Accept only `gh pr merge --auto --squash \"${PR_NUMBER}\"` (exact PR).
+    """Accept only `gh pr merge --auto --squash --match-head-commit \"${EXPECTED_OID}\" \"${PR_NUMBER}\"` (exact PR at the exact commit).
 
     The merge must target the captured PR number variable, never a branch
-    name, and must request auto-merge (never an immediate merge that would
-    bypass the required PR checks gating the merge).
+    name, must request auto-merge (never an immediate merge that would
+    bypass the required PR checks gating the merge), and must bind
+    auto-merge to the expected pin commit OID so a raced or replaced head
+    can never be merged.
     """
     tokens = strip_env_prefix(argv)
     if tokens and tokens[0] == "gh":
@@ -281,10 +284,55 @@ def gh_pr_merge_is_exact_auto_squash(argv: list) -> bool:
         return False
     if "--squash" not in tokens:
         return False
+    if "--match-head-commit" not in tokens:
+        return False
+    match_index = tokens.index("--match-head-commit")
+    if match_index + 1 >= len(tokens):
+        return False
+    if tokens[match_index + 1] != "${EXPECTED_OID}":
+        return False
     merge_index = tokens.index("merge")
     tail = tokens[merge_index + 1:]
     targets = [token for token in tail if not token.startswith("-")]
-    return targets == ["${PR_NUMBER}"]
+    return sorted(targets) == ["${EXPECTED_OID}", "${PR_NUMBER}"]
+
+
+EXPECTED_OID_RE = re.compile(r"[0-9a-f]{40}")
+
+
+def is_expected_pin_oid(value: object) -> bool:
+    """Accept only a full 40-char lowercase-hex pin commit OID."""
+    return isinstance(value, str) and bool(EXPECTED_OID_RE.fullmatch(value))
+
+
+def gh_api_approval_is_commit_bound(argv: list) -> bool:
+    """Accept only a commit-bound REST approval for the exact pin PR.
+
+    The call must be `gh api
+    \"repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews\" -f
+    event=APPROVE -f commit_id=${EXPECTED_OID}`: the captured PR number
+    (never a branch name) with the approval explicitly recorded against
+    the expected pin commit OID, instead of relying on ambient-head
+    review selection.
+    """
+    tokens = strip_env_prefix(argv)
+    if tokens and tokens[0] == "gh":
+        tokens = tokens[1:]
+    if len(tokens) < 2 or tokens[0] != "api":
+        return False
+    if tokens[1] != "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews":
+        return False
+    flags = tokens[2:]
+    if len(flags) != 4:
+        return False
+    pairs = []
+    index = 0
+    while index < len(flags):
+        if flags[index] != "-f":
+            return False
+        pairs.append(flags[index + 1])
+        index += 2
+    return sorted(pairs) == ["commit_id=${EXPECTED_OID}", "event=APPROVE"]
 
 
 def metainfo_release_entry(pinned_version, existing_version, existing_date, today):
@@ -390,6 +438,16 @@ def run_block_is_shell_safe(block: str) -> bool:
 def read_text(path: str) -> str:
     with open(path, "r", encoding="utf-8") as handle:
         return handle.read()
+
+
+def shell_command_of(line: str) -> str:
+    """Strip `if ! ...; then` shell wrapping so shlex sees the bare command."""
+    cmd = line.strip()
+    if cmd.startswith("if "):
+        cmd = cmd[len("if "):].lstrip()
+    if cmd.startswith("! "):
+        cmd = cmd[len("! "):].lstrip()
+    return re.sub(r";\s*then\s*$", "", cmd)
 
 
 def workflow_step_containing(text: str, marker: str) -> str:
@@ -584,39 +642,156 @@ class GitSafetyHelperTests(unittest.TestCase):
     def test_pr_merge_requires_exact_auto_squash_target(self):
         self.assertTrue(
             gh_pr_merge_is_exact_auto_squash(
-                ["gh", "pr", "merge", "--auto", "--squash", "${PR_NUMBER}"]
+                ["gh", "pr", "merge", "--auto", "--squash",
+                 "--match-head-commit", "${EXPECTED_OID}", "${PR_NUMBER}"]
             )
         )
         self.assertTrue(
             gh_pr_merge_is_exact_auto_squash(
-                ["GH_TOKEN=x", "gh", "pr", "merge", "--auto", "--squash", "${PR_NUMBER}"]
+                ["GH_TOKEN=x", "gh", "pr", "merge", "--auto", "--squash",
+                 "--match-head-commit", "${EXPECTED_OID}", "${PR_NUMBER}"]
             )
         )
         # Immediate merge without --auto would bypass required PR checks before merge.
         self.assertFalse(
             gh_pr_merge_is_exact_auto_squash(
-                ["gh", "pr", "merge", "--squash", "${PR_NUMBER}"]
+                ["gh", "pr", "merge", "--squash",
+                 "--match-head-commit", "${EXPECTED_OID}", "${PR_NUMBER}"]
+            )
+        )
+        # Auto-merge without a commit binding could merge a raced head.
+        self.assertFalse(
+            gh_pr_merge_is_exact_auto_squash(
+                ["gh", "pr", "merge", "--auto", "--squash", "${PR_NUMBER}"]
+            )
+        )
+        # The binding must name the expected OID variable, not a branch,
+        # a short SHA, or a hardcoded value.
+        for bad_oid in ("${PIN_BRANCH}", "pin/sand-0.47.0", "abc123", "A" * 40):
+            self.assertFalse(
+                gh_pr_merge_is_exact_auto_squash(
+                    ["gh", "pr", "merge", "--auto", "--squash",
+                     "--match-head-commit", bad_oid, "${PR_NUMBER}"]
+                ),
+                bad_oid,
+            )
+        self.assertFalse(
+            gh_pr_merge_is_exact_auto_squash(
+                ["gh", "pr", "merge", "--auto", "--squash",
+                 "--match-head-commit"]
             )
         )
         # Ambiguous branch targeting is rejected; only the exact PR number counts.
         self.assertFalse(
             gh_pr_merge_is_exact_auto_squash(
-                ["gh", "pr", "merge", "--auto", "--squash", "${PIN_BRANCH}"]
+                ["gh", "pr", "merge", "--auto", "--squash",
+                 "--match-head-commit", "${EXPECTED_OID}", "${PIN_BRANCH}"]
             )
         )
         self.assertFalse(
             gh_pr_merge_is_exact_auto_squash(
-                ["gh", "pr", "merge", "--auto", "--squash", "pin/sand-0.47.0"]
+                ["gh", "pr", "merge", "--auto", "--squash",
+                 "--match-head-commit", "${EXPECTED_OID}", "pin/sand-0.47.0"]
             )
         )
         # A non-squash merge method is rejected for pin PRs.
         self.assertFalse(
             gh_pr_merge_is_exact_auto_squash(
-                ["gh", "pr", "merge", "--auto", "--merge", "${PR_NUMBER}"]
+                ["gh", "pr", "merge", "--auto", "--merge",
+                 "--match-head-commit", "${EXPECTED_OID}", "${PR_NUMBER}"]
             )
         )
         self.assertFalse(
-            gh_pr_merge_is_exact_auto_squash(["gh", "pr", "merge", "--auto", "--squash"])
+            gh_pr_merge_is_exact_auto_squash(
+                ["gh", "pr", "merge", "--auto", "--squash",
+                 "--match-head-commit", "${EXPECTED_OID}"]
+            )
+        )
+
+    def test_expected_pin_oid_requires_full_lowercase_sha(self):
+        self.assertTrue(is_expected_pin_oid("c1e7d7a46549956d25f53e9c0b9f59666e03aa3a"))
+        self.assertTrue(is_expected_pin_oid("0" * 40))
+        for bad in (
+            "",
+            "abc123",
+            "C1E7D7A46549956D25F53E9C0B9F59666E03AA3A",
+            "c1e7d7a46549956d25f53e9c0b9f59666e03aa3",
+            "c1e7d7a46549956d25f53e9c0b9f59666e03aa3a ",
+            "c1e7d7a46549956d25f53e9c0b9f59666e03aa3a\n",
+            "0" * 64,
+            "${EXPECTED_OID}",
+            None,
+            42,
+        ):
+            self.assertFalse(is_expected_pin_oid(bad), repr(bad))
+
+    def test_api_approval_requires_commit_bound_exact_pr(self):
+        good = [
+            "gh", "api",
+            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews",
+            "-f", "event=APPROVE",
+            "-f", "commit_id=${EXPECTED_OID}",
+        ]
+        self.assertTrue(gh_api_approval_is_commit_bound(good))
+        self.assertTrue(
+            gh_api_approval_is_commit_bound(["GH_TOKEN=x"] + good)
+        )
+        # Flag order is irrelevant; the binding is what matters.
+        swapped = [
+            "gh", "api",
+            "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews",
+            "-f", "commit_id=${EXPECTED_OID}",
+            "-f", "event=APPROVE",
+        ]
+        self.assertTrue(gh_api_approval_is_commit_bound(swapped))
+        # Ambient-head review can approve whatever the head became.
+        self.assertFalse(
+            gh_api_approval_is_commit_bound(
+                ["gh", "pr", "review", "--approve", "${PR_NUMBER}"]
+            )
+        )
+        # A non-approve event never satisfies the one-approval ruleset.
+        for event in ("event=CHANGES_REQUESTED", "event=COMMENT"):
+            self.assertFalse(
+                gh_api_approval_is_commit_bound(
+                    ["gh", "api",
+                     "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews",
+                     "-f", event,
+                     "-f", "commit_id=${EXPECTED_OID}"]
+                ),
+                event,
+            )
+        # The approval must bind the expected OID, never a branch, a
+        # short SHA, or a hardcoded commit.
+        for bad_oid in ("${PIN_BRANCH}", "abc123", "0" * 40):
+            self.assertFalse(
+                gh_api_approval_is_commit_bound(
+                    ["gh", "api",
+                     "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews",
+                     "-f", "event=APPROVE",
+                     "-f", "commit_id=%s" % bad_oid]
+                ),
+                bad_oid,
+            )
+        # A missing commit binding, a branch-targeted path, or an extra
+        # positional all fail closed.
+        self.assertFalse(
+            gh_api_approval_is_commit_bound(
+                ["gh", "api",
+                 "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews",
+                 "-f", "event=APPROVE"]
+            )
+        )
+        self.assertFalse(
+            gh_api_approval_is_commit_bound(
+                ["gh", "api",
+                 "repos/${GITHUB_REPOSITORY}/pulls/pin/sand-0.47.0/reviews",
+                 "-f", "event=APPROVE",
+                 "-f", "commit_id=${EXPECTED_OID}"]
+            )
+        )
+        self.assertFalse(
+            gh_api_approval_is_commit_bound(good + ["extra"])
         )
 
     def test_pin_pr_identity_checks_reject_foreign_prs(self):
@@ -850,6 +1025,7 @@ class PinWorkflowContractTests(unittest.TestCase):
         self.assertIn("gh pr merge --auto --squash", text)
         self.assertIn('"${PR_NUMBER}"', text)
         self.assertIn("--json number", text)
+        self.assertIn('--match-head-commit "${EXPECTED_OID}"', text)
         merge_lines = [
             line.strip()
             for line in text.splitlines()
@@ -860,8 +1036,13 @@ class PinWorkflowContractTests(unittest.TestCase):
             self.assertIn("--auto", line)
             self.assertIn("--squash", line)
             self.assertIn('"${PR_NUMBER}"', line)
+            self.assertIn('--match-head-commit "${EXPECTED_OID}"', line)
             self.assertNotIn("PIN_BRANCH", line)
             self.assertNotIn("pin/sand-", line)
+            self.assertTrue(
+                gh_pr_merge_is_exact_auto_squash(shlex.split(shell_command_of(line))),
+                f"merge line must satisfy the exact commit-bound contract: {line}",
+            )
 
     def test_pin_never_pushes_or_merges_main_directly(self):
         text = read_text(PIN_WORKFLOW_PATH)
@@ -873,6 +1054,7 @@ class PinWorkflowContractTests(unittest.TestCase):
             if re.search(r"\bgh\s+pr\s+merge\b", stripped):
                 self.assertIn("--auto", stripped)
                 self.assertIn('"${PR_NUMBER}"', stripped)
+                self.assertIn('--match-head-commit "${EXPECTED_OID}"', stripped)
 
     def test_pin_auto_merge_fails_closed_without_exact_pr(self):
         text = read_text(PIN_WORKFLOW_PATH)
@@ -899,7 +1081,7 @@ class PinWorkflowContractTests(unittest.TestCase):
 
     def test_pin_approval_uses_default_token_not_app_token(self):
         text = read_text(PIN_WORKFLOW_PATH)
-        approval = workflow_step_containing(text, "gh pr review --approve")
+        approval = workflow_step_containing(text, "pulls/${PR_NUMBER}/reviews")
         self.assertTrue(approval, "pin.yml must have an exact-PR approval step")
         self.assertIn("github.token", approval)
         self.assertNotIn("app-token", approval)
@@ -908,11 +1090,12 @@ class PinWorkflowContractTests(unittest.TestCase):
 
     def test_pin_approval_validates_exact_pr_identity(self):
         text = read_text(PIN_WORKFLOW_PATH)
-        approval = workflow_step_containing(text, "gh pr review --approve")
+        approval = workflow_step_containing(text, "pulls/${PR_NUMBER}/reviews")
         self.assertTrue(approval, "pin.yml must have an exact-PR approval step")
         self.assertIn("--json reviewDecision", approval)
         self.assertIn("--json state", approval)
         self.assertIn("--json headRefName", approval)
+        self.assertIn("--json headRefOid", approval)
         self.assertIn("--json baseRefName", approval)
         self.assertIn("--json author", approval)
         self.assertIn("OPEN", approval)
@@ -923,28 +1106,36 @@ class PinWorkflowContractTests(unittest.TestCase):
         self.assertIn("refusing to approve", approval)
         self.assertIn("failed to approve the exact pin PR", approval)
         self.assertIn("exit 1", approval)
-        review_lines = [
+        # Ambient-head review must not select the approved commit.
+        self.assertNotIn("gh pr review", approval)
+        api_lines = [
             line.strip()
             for line in approval.splitlines()
-            if re.search(r"\bgh\s+pr\s+review\b", line)
+            if re.search(r"\bgh\s+api\b", line)
         ]
-        self.assertTrue(review_lines, "approval must run gh pr review")
-        for line in review_lines:
-            self.assertIn("--approve", line)
-            self.assertIn('"${PR_NUMBER}"', line)
+        self.assertTrue(api_lines, "approval must run gh api for a commit-bound review")
+        for line in api_lines:
+            self.assertIn("pulls/${PR_NUMBER}/reviews", line)
+            self.assertIn("event=APPROVE", line)
+            self.assertIn('commit_id="${EXPECTED_OID}"', line)
             self.assertNotIn("PIN_BRANCH", line)
             self.assertNotIn("pin/sand-", line)
+            self.assertTrue(
+                gh_api_approval_is_commit_bound(shlex.split(shell_command_of(line))),
+                f"approval line must satisfy the commit-bound contract: {line}",
+            )
 
     def test_pin_pr_mutations_target_only_the_captured_number(self):
         text = read_text(PIN_WORKFLOW_PATH)
         mutation_lines = [
             line.strip()
             for line in text.splitlines()
-            if re.search(r"\bgh\s+pr\s+(merge|review)\b", line)
+            if re.search(r"\bgh\s+pr\s+merge\b", line)
+            or re.search(r"\bgh\s+api\b.*pulls/", line)
         ]
-        self.assertTrue(mutation_lines, "pin.yml must mutate PRs only via merge/review")
+        self.assertTrue(mutation_lines, "pin.yml must mutate PRs only via merge/api review")
         for line in mutation_lines:
-            self.assertIn('"${PR_NUMBER}"', line)
+            self.assertIn("${PR_NUMBER}", line)
             self.assertNotIn("PIN_BRANCH", line)
             self.assertNotIn("pin/sand-", line)
 
@@ -965,30 +1156,36 @@ class PinWorkflowContractTests(unittest.TestCase):
         ordered = [
             "cannot establish the exact pin PR; refusing to enable auto-merge",
             "invalid pin PR number; refusing to enable auto-merge",
+            'EXPECTED_OID="$(cat "${RUNNER_TEMP}/pin/head_oid")"',
+            "pin commit OID is malformed; refusing to enable auto-merge",
+            "pin commit OID is not a full 40-char SHA; refusing to enable auto-merge",
             "--json state",
             "--json headRefName",
+            "--json headRefOid",
             "--json baseRefName",
             "--json author",
             "is not OPEN; refusing to enable auto-merge",
             "is not the expected pin branch; refusing to enable auto-merge",
             "base is not main; refusing to enable auto-merge",
             "is not the expected pin app; refusing to enable auto-merge",
-            "gh pr merge --auto",
+            "is not the pinned commit; refusing to enable auto-merge",
+            'gh pr merge --auto --squash --match-head-commit "${EXPECTED_OID}"',
         ]
         indices = [merge_step.index(marker) for marker in ordered]
         self.assertEqual(
             indices,
             sorted(indices),
-            "number checks, then identity validation, then auto-merge, in that order",
+            "number checks, then OID load, then identity+OID validation, then bound auto-merge, in that order",
         )
 
     def test_pin_merge_and_approval_share_identity_requirements(self):
         text = read_text(PIN_WORKFLOW_PATH)
         merge_step = workflow_step_containing(text, "gh pr merge --auto")
-        approval = workflow_step_containing(text, "gh pr review --approve")
+        approval = workflow_step_containing(text, "pulls/${PR_NUMBER}/reviews")
         required = (
             "--json state",
             "--json headRefName",
+            "--json headRefOid",
             "--json baseRefName",
             "--json author",
             '"main"',
@@ -996,6 +1193,9 @@ class PinWorkflowContractTests(unittest.TestCase):
             "app/grok-bot-pin",
             "pin/sand-${PIN_VERSION}",
             "OPEN",
+            "${RUNNER_TEMP}/pin/head_oid",
+            "EXPECTED_OID",
+            "is not the pinned commit",
         )
         for marker in required:
             self.assertIn(marker, merge_step, f"merge step must check {marker}")
@@ -1003,26 +1203,85 @@ class PinWorkflowContractTests(unittest.TestCase):
 
     def test_pin_approval_noop_follows_identity_validation(self):
         text = read_text(PIN_WORKFLOW_PATH)
-        approval = workflow_step_containing(text, "gh pr review --approve")
+        approval = workflow_step_containing(text, "pulls/${PR_NUMBER}/reviews")
         self.assertTrue(approval, "pin.yml must have an exact-PR approval step")
-        queries = ("--json state", "--json headRefName", "--json baseRefName", "--json author")
+        queries = ("--json state", "--json headRefName", "--json headRefOid", "--json baseRefName", "--json author")
         refusals = (
             "is not OPEN; refusing to approve",
             "is not the expected pin branch; refusing to approve",
             "base is not main; refusing to approve",
             "is not the expected pin app; refusing to approve",
+            "is not the pinned commit; refusing to approve",
+        )
+        oid_binding = (
+            'EXPECTED_OID="$(cat "${RUNNER_TEMP}/pin/head_oid")"',
+            "pin commit OID is malformed; refusing to approve",
+            "pin commit OID is not a full 40-char SHA; refusing to approve",
         )
         noop_idx = approval.index('= "APPROVED"')
-        approve_idx = approval.index("gh pr review --approve")
-        for marker in queries + refusals:
+        approve_idx = approval.index("pulls/${PR_NUMBER}/reviews", noop_idx)
+        for marker in queries + refusals + oid_binding:
             self.assertLess(
                 approval.index(marker),
                 noop_idx,
-                f"identity check must precede the APPROVED no-op: {marker}",
+                f"identity/OID check must precede the APPROVED no-op: {marker}",
             )
         self.assertLess(
             noop_idx, approve_idx, "the APPROVED no-op must precede the approval mutation"
         )
+
+    def test_pin_captures_commit_oid_after_commit_before_push(self):
+        text = read_text(PIN_WORKFLOW_PATH)
+        commit_step = workflow_step_containing(text, "git commit -m")
+        self.assertTrue(commit_step, "pin.yml must commit the pin by path")
+        commit_idx = commit_step.index('git commit -m "chore(pin): sand ${PIN_VERSION}"')
+        rev_idx = commit_step.index("git rev-parse HEAD", commit_idx)
+        oid_idx = commit_step.index('> "${RUNNER_TEMP}/pin/head_oid"', rev_idx)
+        push_idx = commit_step.index("--force-with-lease", oid_idx)
+        self.assertLess(commit_idx, rev_idx)
+        self.assertLess(rev_idx, oid_idx)
+        self.assertLess(oid_idx, push_idx)
+        self.assertIn("pin commit OID is not lowercase hex; failing closed", commit_step)
+        self.assertIn("pin commit OID is not a full 40-char SHA; failing closed", commit_step)
+        self.assertIn('"${#PIN_OID}" -ne 40', commit_step)
+
+    def test_pin_quiet_index_rerun_still_binds_expected_oid(self):
+        text = read_text(PIN_WORKFLOW_PATH)
+        commit_step = workflow_step_containing(text, "git commit -m")
+        self.assertTrue(commit_step, "pin.yml must commit the pin by path")
+        # The quiet-index branch must still produce a strictly validated
+        # expected-OID file: downstream auto-merge/approval run whenever
+        # the working tree changed, even when the pin branch tip already
+        # holds those bytes, and would otherwise fail at `cat head_oid`.
+        quiet_idx = commit_step.index("pins are already current on ${PIN_BRANCH}")
+        rev_idx = commit_step.index("git rev-parse HEAD", quiet_idx)
+        oid_idx = commit_step.index('> "${RUNNER_TEMP}/pin/head_oid"', rev_idx)
+        length_idx = commit_step.index('"${#PIN_OID}" -ne 40', quiet_idx)
+        exit_idx = commit_step.index("exit 0", oid_idx)
+        self.assertLess(quiet_idx, rev_idx)
+        self.assertLess(rev_idx, oid_idx)
+        self.assertLess(oid_idx, exit_idx)
+        self.assertLess(quiet_idx, length_idx)
+        self.assertLess(length_idx, exit_idx)
+        quiet_branch = commit_step[quiet_idx:exit_idx]
+        self.assertIn("pin commit OID is not lowercase hex; failing closed", quiet_branch)
+        self.assertIn("pin commit OID is not a full 40-char SHA; failing closed", quiet_branch)
+        # The empty index still pushes nothing: the quiet branch exits
+        # before the commit and the force-with-lease push.
+        self.assertLess(exit_idx, commit_step.index("--force-with-lease"))
+
+    def test_pin_mutations_reject_raced_head_oid(self):
+        text = read_text(PIN_WORKFLOW_PATH)
+        merge_step = workflow_step_containing(text, "gh pr merge --auto")
+        approval = workflow_step_containing(text, "pulls/${PR_NUMBER}/reviews")
+        for step, verb in ((merge_step, "enable auto-merge"), (approval, "approve")):
+            self.assertIn("--json headRefOid", step, verb)
+            self.assertIn(
+                '"${PR_HEAD_OID}" != "${EXPECTED_OID}"', step, verb
+            )
+            self.assertIn(
+                "is not the pinned commit; refusing to %s" % verb, step, verb
+            )
 
     def test_run_blocks_have_no_composed_feed_args(self):
         text = read_text(PIN_WORKFLOW_PATH)

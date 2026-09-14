@@ -84,7 +84,7 @@ jobs:
     steps:
       - name: Check out the chain commit (automatic path)
         if: ${{ github.event_name == 'workflow_run' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
@@ -92,7 +92,7 @@ jobs:
 
       - name: Check out the dispatched main snapshot (manual path)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -255,7 +255,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out the decided commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           ref: ${{ needs.decide.outputs.sha }}
 
@@ -269,7 +269,7 @@ jobs:
           flatpak-builder --force-clean --repo=repo build-dir io.github.viniciosrab.GrokBot.yml
 
       - name: Upload the x86_64 repo
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: repo-x86_64
           path: repo
@@ -280,7 +280,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - name: Check out the decided commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           ref: ${{ needs.decide.outputs.sha }}
 
@@ -294,7 +294,7 @@ jobs:
           flatpak-builder --force-clean --repo=repo build-dir io.github.viniciosrab.GrokBot.yml
 
       - name: Upload the aarch64 repo
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: repo-aarch64
           path: repo
@@ -311,7 +311,7 @@ jobs:
       name: github-pages
     steps:
       - name: Check out the decided commit
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           ref: ${{ needs.decide.outputs.sha }}
           fetch-depth: 0
@@ -328,7 +328,7 @@ jobs:
           fi
 
       - name: Collect both architecture repos
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           path: arch-repos
 
@@ -433,13 +433,13 @@ jobs:
           fi
 
       - name: Deploy the Flatpak Repository to Pages
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: site
 
       - name: Publish to the Pages environment
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
 
       - name: Mark the deployed release
         env:
@@ -477,7 +477,7 @@ jobs:
       name: github-pages
     steps:
       - name: Check out the repository with tags
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           ref: ${{ needs.decide.outputs.sha }}
           fetch-depth: 0
@@ -526,10 +526,10 @@ jobs:
 
       - name: Upload the recovered site for rollback
         if: steps.recover.outputs.recovered == 'true'
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
         with:
           path: site
 
       - name: Publish the recovered site to Pages
         if: steps.recover.outputs.recovered == 'true'
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4

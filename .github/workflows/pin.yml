@@ -3,14 +3,16 @@
 # and data/io.github.viniciosrab.GrokBot.metainfo.xml.
 #
 # The job polls every six hours, refreshes the pin/sand-${VERSION} branch,
-# opens the exact pin PR when needed, approves that exact PR with the
-# default github.token identity, and enables squash auto-merge with the
-# App token, so required PR checks (including the one-approval ruleset)
+# opens the exact pin PR when needed, approves that exact PR at the exact
+# commit captured by this run with the default github.token identity, and
+# enables squash auto-merge with the App token bound to that same commit
+# (--match-head-commit), so required PR checks (including the one-approval ruleset)
 # gate the merge; after the merge, the main-branch validate -> X3 -> publish
 # chain gates the release. Only a genuinely new upstream version stamps a
 # new metainfo release date; a same-version repin preserves the existing
 # release date. Every approval and auto-merge setup step fails closed when
-# the exact PR identity cannot be established. Nothing ever pushes
+# the exact PR identity cannot be established, or when the live PR head
+# differs from the exact pin commit captured by this run. Nothing ever pushes
 # directly to main.
 #
 # Feed identity is closed: only the two sand feeds below are queried. No
@@ -49,7 +51,7 @@ jobs:
       pull-requests: write
     steps:
       - name: Check out the repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
         with:
           persist-credentials: false
 
@@ -70,7 +72,7 @@ jobs:
 
       - name: Mint GitHub App installation token
         id: app-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@d72941d797fd3113feb6b93fd0dec494b13a2547 # v1
         with:
           app-id: ${{ secrets.APP_ID }}
           private-key: ${{ secrets.APP_PRIVATE_KEY }}
@@ -288,9 +290,41 @@ jobs:
           git add -- data/pins.yml io.github.viniciosrab.GrokBot.yml data/io.github.viniciosrab.GrokBot.metainfo.xml
           if git diff --cached --quiet; then
             echo "pins are already current on ${PIN_BRANCH}; nothing new to push"
+            # Rerun/overlap liveness: the index already matches the intended
+            # remote pin branch tip, so bind downstream mutations to that
+            # exact commit with the same strict validation as a fresh pin
+            # commit. Without this, downstream steps would run (the working
+            # tree changed) but find no expected-OID file and fail.
+            PIN_OID="$(git rev-parse HEAD)"
+            case "${PIN_OID}" in
+              ""|*[!0-9a-f]*)
+                echo "pin commit OID is not lowercase hex; failing closed" >&2
+                exit 1
+                ;;
+            esac
+            if [ "${#PIN_OID}" -ne 40 ]; then
+              echo "pin commit OID is not a full 40-char SHA; failing closed" >&2
+              exit 1
+            fi
+            printf '%s\n' "${PIN_OID}" > "${RUNNER_TEMP}/pin/head_oid"
             exit 0
           fi
           git commit -m "chore(pin): sand ${PIN_VERSION}" -- data/pins.yml io.github.viniciosrab.GrokBot.yml data/io.github.viniciosrab.GrokBot.metainfo.xml
+          # Bind every later PR mutation to this exact commit: capture the
+          # new pin commit OID into a run-scoped file with strict
+          # 40-lowercase-hex validation, before the branch is pushed.
+          PIN_OID="$(git rev-parse HEAD)"
+          case "${PIN_OID}" in
+            ""|*[!0-9a-f]*)
+              echo "pin commit OID is not lowercase hex; failing closed" >&2
+              exit 1
+              ;;
+          esac
+          if [ "${#PIN_OID}" -ne 40 ]; then
+            echo "pin commit OID is not a full 40-char SHA; failing closed" >&2
+            exit 1
+          fi
+          printf '%s\n' "${PIN_OID}" > "${RUNNER_TEMP}/pin/head_oid"
           git -c http.https://github.com/.extraheader="AUTHORIZATION: basic $(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 -w0)" push --force-with-lease origin "${PIN_BRANCH}"
 
       - name: Open the pin branch PR and enable auto-merge
@@ -338,11 +372,25 @@ jobs:
             echo "invalid pin PR number; refusing to enable auto-merge" >&2
             exit 1
           fi
+          # Bind this mutation to the exact commit captured by this run:
+          # load the expected OID with strict 40-lowercase-hex validation.
+          EXPECTED_OID="$(cat "${RUNNER_TEMP}/pin/head_oid")"
+          case "${EXPECTED_OID}" in
+            ""|*[!0-9a-f]*)
+              echo "pin commit OID is malformed; refusing to enable auto-merge" >&2
+              exit 1
+              ;;
+          esac
+          if [ "${#EXPECTED_OID}" -ne 40 ]; then
+            echo "pin commit OID is not a full 40-char SHA; refusing to enable auto-merge" >&2
+            exit 1
+          fi
           # No auto-merge until the exact PR identity is fully validated: a
           # foreign or stale PR on a pin/sand-* branch must never receive it,
           # and a later failure would not undo that mutation.
           PR_STATE="$(gh pr view "${PR_NUMBER}" --json state --jq .state)"
           PR_HEAD="$(gh pr view "${PR_NUMBER}" --json headRefName --jq .headRefName)"
+          PR_HEAD_OID="$(gh pr view "${PR_NUMBER}" --json headRefOid --jq .headRefOid)"
           PR_BASE="$(gh pr view "${PR_NUMBER}" --json baseRefName --jq .baseRefName)"
           PR_AUTHOR="$(gh pr view "${PR_NUMBER}" --json author --jq .author.login)"
           if [ "${PR_STATE}" != "OPEN" ]; then
@@ -364,7 +412,23 @@ jobs:
             echo "pin PR author is not the expected pin app; refusing to enable auto-merge" >&2
             exit 1
           fi
-          if ! gh pr merge --auto --squash "${PR_NUMBER}"; then
+          # The live PR head must still be the exact pin commit captured by
+          # this run; a raced or replaced head must never receive auto-merge.
+          case "${PR_HEAD_OID}" in
+            ""|*[!0-9a-f]*)
+              echo "pin PR head OID is malformed; refusing to enable auto-merge" >&2
+              exit 1
+              ;;
+          esac
+          if [ "${#PR_HEAD_OID}" -ne 40 ]; then
+            echo "pin PR head OID is not a full 40-char SHA; refusing to enable auto-merge" >&2
+            exit 1
+          fi
+          if [ "${PR_HEAD_OID}" != "${EXPECTED_OID}" ]; then
+            echo "pin PR head is not the pinned commit; refusing to enable auto-merge" >&2
+            exit 1
+          fi
+          if ! gh pr merge --auto --squash --match-head-commit "${EXPECTED_OID}" "${PR_NUMBER}"; then
             echo "failed to enable auto-merge for the exact pin PR; failing closed" >&2
             exit 1
           fi
@@ -407,8 +471,22 @@ jobs:
             echo "invalid pin PR number; refusing to approve" >&2
             exit 1
           fi
+          # Bind this approval to the exact commit captured by this run:
+          # load the expected OID with strict 40-lowercase-hex validation.
+          EXPECTED_OID="$(cat "${RUNNER_TEMP}/pin/head_oid")"
+          case "${EXPECTED_OID}" in
+            ""|*[!0-9a-f]*)
+              echo "pin commit OID is malformed; refusing to approve" >&2
+              exit 1
+              ;;
+          esac
+          if [ "${#EXPECTED_OID}" -ne 40 ]; then
+            echo "pin commit OID is not a full 40-char SHA; refusing to approve" >&2
+            exit 1
+          fi
           PR_STATE="$(gh pr view "${PR_NUMBER}" --json state --jq .state)"
           PR_HEAD="$(gh pr view "${PR_NUMBER}" --json headRefName --jq .headRefName)"
+          PR_HEAD_OID="$(gh pr view "${PR_NUMBER}" --json headRefOid --jq .headRefOid)"
           PR_BASE="$(gh pr view "${PR_NUMBER}" --json baseRefName --jq .baseRefName)"
           PR_AUTHOR="$(gh pr view "${PR_NUMBER}" --json author --jq .author.login)"
           if [ "${PR_STATE}" != "OPEN" ]; then
@@ -430,15 +508,35 @@ jobs:
             echo "pin PR author is not the expected pin app; refusing to approve" >&2
             exit 1
           fi
-          # The rerun no-op below runs only after full identity validation,
-          # so a foreign or stale (but already approved) PR fails closed
-          # above instead of exiting success silently.
+          # The live PR head must still be the exact pin commit captured by
+          # this run; a raced or replaced head must never receive approval.
+          case "${PR_HEAD_OID}" in
+            ""|*[!0-9a-f]*)
+              echo "pin PR head OID is malformed; refusing to approve" >&2
+              exit 1
+              ;;
+          esac
+          if [ "${#PR_HEAD_OID}" -ne 40 ]; then
+            echo "pin PR head OID is not a full 40-char SHA; refusing to approve" >&2
+            exit 1
+          fi
+          if [ "${PR_HEAD_OID}" != "${EXPECTED_OID}" ]; then
+            echo "pin PR head is not the pinned commit; refusing to approve" >&2
+            exit 1
+          fi
+          # The rerun no-op below runs only after full identity validation
+          # (including the expected-OID check above), so a foreign or stale
+          # (but already approved) PR fails closed above instead of exiting
+          # success silently.
           DECISION="$(gh pr view "${PR_NUMBER}" --json reviewDecision --jq .reviewDecision)"
           if [ "${DECISION}" = "APPROVED" ]; then
             echo "pin PR #${PR_NUMBER} is already approved; skipping approval (rerun safe)"
             exit 0
           fi
-          if ! gh pr review --approve "${PR_NUMBER}"; then
+          # Commit-bound approval via the REST reviews API: the approval is
+          # recorded against the expected commit ID explicitly, instead of
+          # relying on review ambiently selecting the current head.
+          if ! gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews" -f event=APPROVE -f commit_id="${EXPECTED_OID}"; then
             echo "failed to approve the exact pin PR; failing closed" >&2
             exit 1
           fi
