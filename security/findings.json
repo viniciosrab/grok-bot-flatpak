@@ -1,0 +1,1177 @@
+{
+  "documentType": "codex-security.findings",
+  "findings": [
+    {
+      "attackPath": {
+        "dataflow": {
+          "evidenceRefs": [
+            "install-no-gpg"
+          ],
+          "outcome": "replacement code executes",
+          "sink": "Flatpak install/update",
+          "source": "compromised Pages content",
+          "summary": "Pages content -> unverified Flatpak remote -> application execution"
+        },
+        "impact": {
+          "level": "high",
+          "why": "Replacement application code executes with declared Flatpak permissions."
+        },
+        "likelihood": {
+          "level": "low",
+          "why": "GitHub Pages or authenticated origin compromise is required."
+        },
+        "reachability": {
+          "attacker": "distribution-channel attacker",
+          "entrypoint": "Pages Flatpak remote",
+          "outcome": "unauthenticated update acceptance",
+          "summary": "Requires control of the HTTPS publication origin."
+        },
+        "summary": "Replace content at the configured Pages origin and let an unverified client install or update."
+      },
+      "codeEvidence": [
+        {
+          "code": "flatpak remote-add --user --if-not-exists --no-gpg-verify grok-bot \\\n  https://viniciosrab.github.io/grok-bot-flatpak/",
+          "endLine": 17,
+          "explanation": "Clients following the supported setup accept the remote without repository-signature verification.",
+          "id": "install-no-gpg",
+          "label": "Production remote disables GPG checks",
+          "language": "shell",
+          "path": "README.md",
+          "role": "root_control",
+          "startLine": 16
+        },
+        {
+          "code": "printf '%s' \"${GPG_KEY}\" | gpg --import\nKEY_ID=\"$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ {print $5; exit}')\"\nflatpak build-update-repo --prune --gpg-sign=\"${KEY_ID}\" site",
+          "endLine": 356,
+          "explanation": "The release creates a signature, but the documented client path does not enforce it.",
+          "id": "signing-unused",
+          "label": "Publisher signs the repository",
+          "language": "shell",
+          "path": ".github/workflows/publish.yml",
+          "role": "expected_control",
+          "startLine": 353
+        }
+      ],
+      "confidence": {
+        "level": "high",
+        "rationale": "The documented command explicitly disables GPG verification and states that the public key is not distributed."
+      },
+      "findingId": "csf_d91ece76c67571e4c8f4a124",
+      "fingerprints": {
+        "algorithm": "codex-security/v1",
+        "primary": "codex-security/v1:sha256:e46a0e6d1d5c58944c983c76cc756da30d549243eb942442f2c45e4ee69f1c64"
+      },
+      "identity": {
+        "anchor": "users-install-updates-without-verifying-the-repository-signature"
+      },
+      "locations": [
+        {
+          "endLine": 27,
+          "path": "README.md",
+          "role": "root_control",
+          "startLine": 16
+        },
+        {
+          "endLine": 356,
+          "path": ".github/workflows/publish.yml",
+          "role": "expected_control",
+          "startLine": 353
+        }
+      ],
+      "occurrenceId": "occ_cdf92c80bf07a26dd24f6524",
+      "preventiveControls": [
+        "Publish a key-bearing `.flatpakrepo` descriptor."
+      ],
+      "provenance": {
+        "candidateId": "candidate-flatpak-no-gpg-verify",
+        "originalCandidates": [
+          {
+            "cwe": "CWE-494",
+            "title": "Flatpak installation disables repository signature verification"
+          },
+          {
+            "cwe": "CWE-494",
+            "reportedSeverity": "high",
+            "ruleId": "artifact-authenticity.flatpak-client-signature-disabled",
+            "source": "README.md instructs clients to add the signed repository with --no-gpg-verify and says the public signing key is not distributed.",
+            "title": "Flatpak installation disables repository signature verification"
+          }
+        ],
+        "previousFindings": [
+          {
+            "attackPath": {
+              "dataflow": {
+                "summary": "Pages origin content -> unverified Flatpak remote -> install/update -> application execution"
+              },
+              "reachability": {
+                "attacker": "distribution-channel attacker",
+                "entrypoint": "Pages Flatpak remote",
+                "outcome": "replacement code runs with declared Flatpak permissions",
+                "summary": "Requires control of the configured HTTPS origin or publication channel."
+              },
+              "summary": "Compromise the Pages publication origin, serve a modified Flatpak repository, and wait for a user configured with `--no-gpg-verify` to install or update."
+            },
+            "confidence": {
+              "level": "high",
+              "rationale": "The installation command and explicit signature limitation directly establish that client-side GPG verification is disabled."
+            },
+            "identity": {
+              "anchor": "users-install-updates-without-verifying-the-repository-signature"
+            },
+            "locations": [
+              {
+                "endLine": 27,
+                "path": "README.md",
+                "role": "root_control",
+                "startLine": 16
+              },
+              {
+                "endLine": 356,
+                "path": ".github/workflows/publish.yml",
+                "role": "expected_control",
+                "startLine": 353
+              }
+            ],
+            "provenance": {
+              "candidateId": "candidate-flatpak-no-gpg-verify",
+              "originalCandidates": [
+                {
+                  "cwe": "CWE-494",
+                  "title": "Flatpak installation disables repository signature verification"
+                },
+                {
+                  "cwe": "CWE-494",
+                  "reportedSeverity": "high",
+                  "ruleId": "artifact-authenticity.flatpak-client-signature-disabled",
+                  "source": "README.md instructs clients to add the signed repository with --no-gpg-verify and says the public signing key is not distributed.",
+                  "title": "Flatpak installation disables repository signature verification"
+                }
+              ],
+              "source": "baseline_auditor"
+            },
+            "remediation": "Publish the repository public key through an authenticated channel and remove `--no-gpg-verify`, including migration instructions for existing remotes.",
+            "rootCause": {
+              "summary": "The release creates a GPG signature but the installation path does not distribute its trust anchor and explicitly configures Flatpak not to enforce it."
+            },
+            "ruleId": "artifact-authenticity.flatpak-gpg-verification-disabled",
+            "severity": {
+              "level": "low",
+              "rationale": "Impact is attacker code execution inside the application's Flatpak permissions, but exploitation requires compromise of the GitHub Pages publication or HTTPS origin."
+            },
+            "summary": "The documented production setup adds the Pages Flatpak remote with `--no-gpg-verify`, so compromise of the HTTPS publication origin can substitute application updates despite the repository being GPG-signed.",
+            "taxonomy": {
+              "category": "artifact-authenticity",
+              "cwe": [
+                "CWE-494"
+              ]
+            },
+            "title": "Users install updates without verifying the repository signature",
+            "validation": {
+              "limitations": [
+                "HTTPS protects clients while the Pages origin and certificate trust remain uncompromised."
+              ],
+              "method": "static source trace",
+              "summary": "Publication signs the repository, but the only documented client setup explicitly disables verification because no public key is distributed."
+            }
+          },
+          {
+            "attackPath": {
+              "dataflow": {
+                "summary": "Pages origin content -> unverified Flatpak remote -> install/update -> application execution"
+              },
+              "reachability": {
+                "attacker": "distribution-channel attacker",
+                "entrypoint": "Pages Flatpak remote",
+                "outcome": "replacement code runs with declared Flatpak permissions",
+                "summary": "Requires control of the configured HTTPS origin or publication channel."
+              },
+              "summary": "Compromise the Pages publication origin, serve a modified Flatpak repository, and wait for a user configured with `--no-gpg-verify` to install or update."
+            },
+            "confidence": {
+              "level": "high",
+              "rationale": "The installation command and explicit signature limitation directly establish that client-side GPG verification is disabled."
+            },
+            "locations": [
+              {
+                "endLine": 27,
+                "path": "README.md",
+                "role": "root_control",
+                "startLine": 16
+              },
+              {
+                "endLine": 356,
+                "path": ".github/workflows/publish.yml",
+                "role": "expected_control",
+                "startLine": 353
+              }
+            ],
+            "provenance": {
+              "candidateId": "candidate-flatpak-no-gpg-verify",
+              "source": "baseline_auditor"
+            },
+            "remediation": "Publish the repository public key through an authenticated channel and remove `--no-gpg-verify`, including migration instructions for existing remotes.",
+            "rootCause": {
+              "summary": "The release creates a GPG signature but the installation path does not distribute its trust anchor and explicitly configures Flatpak not to enforce it."
+            },
+            "ruleId": "artifact-authenticity.flatpak-gpg-verification-disabled",
+            "severity": {
+              "level": "low",
+              "rationale": "Impact is attacker code execution inside the application's Flatpak permissions, but exploitation requires compromise of the GitHub Pages publication or HTTPS origin."
+            },
+            "summary": "The documented production setup adds the Pages Flatpak remote with `--no-gpg-verify`, so compromise of the HTTPS publication origin can substitute application updates despite the repository being GPG-signed.",
+            "taxonomy": {
+              "category": "artifact-authenticity",
+              "cwe": [
+                "CWE-494"
+              ]
+            },
+            "title": "Users install updates without verifying the repository signature",
+            "validation": {
+              "limitations": [
+                "HTTPS protects clients while the Pages origin and certificate trust remain uncompromised."
+              ],
+              "method": "static source trace",
+              "summary": "Publication signs the repository, but the only documented client setup explicitly disables verification because no public key is distributed."
+            }
+          }
+        ],
+        "source": "baseline_auditor"
+      },
+      "remediation": "Publish the repository public key through an authenticated channel, remove `--no-gpg-verify`, and migrate existing remotes.",
+      "remediationTests": [
+        "Reject production setup instructions containing `--no-gpg-verify`.",
+        "Verify modified repository metadata or objects are rejected."
+      ],
+      "rootCause": {
+        "evidenceRefs": [
+          "install-no-gpg",
+          "signing-unused"
+        ],
+        "summary": "The publisher creates a GPG signature but does not distribute its trust anchor and instructs clients to disable verification."
+      },
+      "ruleId": "artifact-authenticity.flatpak-gpg-verification-disabled",
+      "severity": {
+        "level": "low",
+        "rationale": "Impact is replacement code execution inside the app sandbox, but exploitation requires compromise of GitHub Pages publication or its HTTPS origin."
+      },
+      "summary": "The production instructions add the Pages Flatpak remote with `--no-gpg-verify`, so a compromised publication origin can substitute application updates despite repository signing.",
+      "taxonomy": {
+        "category": "artifact-authenticity",
+        "cwe": [
+          "CWE-494"
+        ]
+      },
+      "title": "Users install updates without verifying the repository signature",
+      "validation": {
+        "counterEvidence": [
+          "HTTPS remains effective while the authenticated origin is uncompromised."
+        ],
+        "evidenceRefs": [
+          "install-no-gpg",
+          "signing-unused"
+        ],
+        "limitations": [
+          "No live client installation was run."
+        ],
+        "method": "static source trace",
+        "summary": "The signed publication and unverified installation paths are both explicit."
+      }
+    },
+    {
+      "attackPath": {
+        "dataflow": {
+          "evidenceRefs": [
+            "self-hash",
+            "bot-approval",
+            "sign-output"
+          ],
+          "outcome": "malicious payload gains project endorsement",
+          "sink": "GPG-signed Pages release",
+          "source": "upstream release infrastructure",
+          "summary": "upstream bytes -> self-derived digest -> automated approval -> signing"
+        },
+        "impact": {
+          "level": "high",
+          "why": "Users can receive attacker code as an endorsed release."
+        },
+        "likelihood": {
+          "level": "medium",
+          "why": "The source establishes the unattended path but not the probability of upstream compromise."
+        },
+        "reachability": {
+          "attacker": "compromised upstream infrastructure",
+          "entrypoint": "scheduled pin workflow",
+          "outcome": "signed malicious release",
+          "summary": "Requires accepted metadata plus artifact delivery, or artifact delivery during a legitimate new release."
+        },
+        "summary": "Supply qualifying malicious release metadata and bytes, pass functional checks, and reach automatic signing."
+      },
+      "codeEvidence": [
+        {
+          "code": "curl -sSL --fail -o \"${RUNNER_TEMP}/pin/x86_64.AppImage\" \"${X64_URL}\"\ncurl -sSL --fail -o \"${RUNNER_TEMP}/pin/aarch64.AppImage\" \"${ARM64_URL}\"\nX64_SHA=\"$(sha256sum \"${RUNNER_TEMP}/pin/x86_64.AppImage\" | cut -d ' ' -f 1)\"\nARM64_SHA=\"$(sha256sum \"${RUNNER_TEMP}/pin/aarch64.AppImage\" | cut -d ' ' -f 1)\"",
+          "endLine": 136,
+          "explanation": "CI derives the only authoritative digests from the candidate executable bytes themselves.",
+          "id": "self-hash",
+          "label": "Candidate downloads become their own pins",
+          "language": "shell",
+          "path": ".github/workflows/pin.yml",
+          "role": "propagation",
+          "startLine": 126
+        },
+        {
+          "code": "DECISION=\"$(gh pr view \"${PR_NUMBER}\" --json reviewDecision --jq .reviewDecision)\"\nif [ \"${DECISION}\" = \"APPROVED\" ]; then exit 0; fi\nif ! gh pr review --approve \"${PR_NUMBER}\"; then exit 1; fi",
+          "endLine": 444,
+          "explanation": "The same automated trust path supplies the required PR approval.",
+          "id": "bot-approval",
+          "label": "Automation supplies release approval",
+          "language": "shell",
+          "path": ".github/workflows/pin.yml",
+          "role": "root_control",
+          "startLine": 436
+        },
+        {
+          "code": "ostree pull-local --repo=site arch-repos/repo-x86_64\nostree pull-local --repo=site arch-repos/repo-aarch64\nprintf '%s' \"${GPG_KEY}\" | gpg --import\nflatpak build-update-repo --prune --gpg-sign=\"${KEY_ID}\" site",
+          "endLine": 356,
+          "explanation": "The resulting repository receives the project's signing endorsement.",
+          "id": "sign-output",
+          "label": "Accepted payload is project-signed",
+          "language": "shell",
+          "path": ".github/workflows/publish.yml",
+          "role": "sink",
+          "startLine": 351
+        }
+      ],
+      "confidence": {
+        "level": "high",
+        "rationale": "Multiple independent reviews and parent validation establish the full feed-to-signing path."
+      },
+      "findingId": "csf_47b6efedb3af8a422a230b4d",
+      "fingerprints": {
+        "algorithm": "codex-security/v1",
+        "primary": "codex-security/v1:sha256:d09d0899e7a877cb4ceae7e89d514494fbbad38f18f75165741f7d1736c3f77e"
+      },
+      "identity": {
+        "anchor": "upstream-compromise-is-automatically-converted-into-a-signed-release"
+      },
+      "locations": [
+        {
+          "endLine": 136,
+          "path": ".github/workflows/pin.yml",
+          "role": "user_input",
+          "startLine": 97
+        },
+        {
+          "endLine": 441,
+          "path": ".github/workflows/pin.yml",
+          "role": "root_control",
+          "startLine": 367
+        },
+        {
+          "endLine": 356,
+          "path": ".github/workflows/publish.yml",
+          "role": "sink",
+          "startLine": 351
+        }
+      ],
+      "occurrenceId": "occ_7203b3d3b8da11d87376d2dd",
+      "preventiveControls": [
+        "Bind provenance to version, commit, architecture, URL, and digest."
+      ],
+      "provenance": {
+        "candidateId": "candidate-self-generated-upstream-checksum",
+        "originalCandidates": [
+          {
+            "cwe": "CWE-345",
+            "title": "Self-generated checksums allow compromised upstream infrastructure into automatic release"
+          },
+          {
+            "cwe": "CWE-345",
+            "reportedSeverity": "high",
+            "ruleId": "artifact-authenticity.self-generated-checksum",
+            "source": ".github/workflows/pin.yml derives the committed digest from the same remotely supplied candidate bytes, then auto-approves and enables auto-merge.",
+            "title": "Self-generated checksums allow compromised upstream infrastructure into automatic release"
+          }
+        ],
+        "previousFindings": [
+          {
+            "attackPath": {
+              "dataflow": {
+                "summary": "upstream feeds and AppImages -> CI-computed digests -> bot PR approval/auto-merge -> main validation/X3 -> GPG-signed release"
+              },
+              "reachability": {
+                "attacker": "compromised upstream release infrastructure",
+                "entrypoint": "scheduled pin workflow",
+                "outcome": "malicious AppImage is project-signed and distributed",
+                "summary": "Requires control of accepted feed metadata plus artifact delivery, or artifact delivery during a legitimate new-version pin."
+              },
+              "summary": "Control qualifying new-release metadata and artifact delivery, provide functional malicious AppImages, pass build/liveness checks, and reach automatic signing and publication."
+            },
+            "confidence": {
+              "level": "high",
+              "rationale": "Three independent reviews and a parent source trace confirm the complete feed-to-pin-to-auto-approval-to-signing path."
+            },
+            "identity": {
+              "anchor": "upstream-compromise-is-automatically-converted-into-a-signed-release"
+            },
+            "locations": [
+              {
+                "endLine": 136,
+                "path": ".github/workflows/pin.yml",
+                "role": "user_input",
+                "startLine": 97
+              },
+              {
+                "endLine": 441,
+                "path": ".github/workflows/pin.yml",
+                "role": "root_control",
+                "startLine": 367
+              },
+              {
+                "endLine": 356,
+                "path": ".github/workflows/publish.yml",
+                "role": "sink",
+                "startLine": 351
+              }
+            ],
+            "provenance": {
+              "candidateId": "candidate-self-generated-upstream-checksum",
+              "originalCandidates": [
+                {
+                  "cwe": "CWE-345",
+                  "title": "Self-generated checksums allow compromised upstream infrastructure into automatic release"
+                },
+                {
+                  "cwe": "CWE-345",
+                  "reportedSeverity": "high",
+                  "ruleId": "artifact-authenticity.self-generated-checksum",
+                  "source": ".github/workflows/pin.yml derives the committed digest from the same remotely supplied candidate bytes, then auto-approves and enables auto-merge.",
+                  "title": "Self-generated checksums allow compromised upstream infrastructure into automatic release"
+                }
+              ],
+              "source": "focused_investigator"
+            },
+            "remediation": "Require vendor signatures or independently authenticated provenance before approval; otherwise require a separate human release-author decision and validate every redirect/final artifact origin.",
+            "rootCause": {
+              "summary": "The same unattended workflow both observes untrusted release bytes and creates the checksum and approval that authorize them, so integrity is mistaken for authenticity."
+            },
+            "ruleId": "artifact-authenticity.self-derived-upstream-checksum",
+            "severity": {
+              "level": "medium",
+              "rationale": "A successful feed/artifact-origin compromise leads to project-signed malicious releases; the external-infrastructure compromise prerequisite makes likelihood uncertain rather than immediate."
+            },
+            "summary": "The pin workflow calculates SHA-256 from the same AppImages supplied by upstream infrastructure, auto-approves those values, and later signs the resulting package without an independent authenticity signal.",
+            "taxonomy": {
+              "category": "artifact-authenticity",
+              "cwe": [
+                "CWE-345"
+              ]
+            },
+            "title": "Upstream compromise is automatically converted into a signed release",
+            "validation": {
+              "counterEvidence": [
+                "The two feeds must agree, URLs are syntactically restricted, and later builds verify the committed digest, but none authenticates the initial bytes."
+              ],
+              "method": "static source trace",
+              "summary": "The workflow receives feed metadata, downloads candidate bytes, derives their only digest, writes it into the manifest, supplies approval and auto-merge, and later signs the result."
+            }
+          },
+          {
+            "attackPath": {
+              "dataflow": {
+                "summary": "upstream feeds and AppImages -> CI-computed digests -> bot PR approval/auto-merge -> main validation/X3 -> GPG-signed release"
+              },
+              "reachability": {
+                "attacker": "compromised upstream release infrastructure",
+                "entrypoint": "scheduled pin workflow",
+                "outcome": "malicious AppImage is project-signed and distributed",
+                "summary": "Requires control of accepted feed metadata plus artifact delivery, or artifact delivery during a legitimate new-version pin."
+              },
+              "summary": "Control qualifying new-release metadata and artifact delivery, provide functional malicious AppImages, pass build/liveness checks, and reach automatic signing and publication."
+            },
+            "confidence": {
+              "level": "high",
+              "rationale": "Three independent reviews and a parent source trace confirm the complete feed-to-pin-to-auto-approval-to-signing path."
+            },
+            "locations": [
+              {
+                "endLine": 136,
+                "path": ".github/workflows/pin.yml",
+                "role": "user_input",
+                "startLine": 97
+              },
+              {
+                "endLine": 441,
+                "path": ".github/workflows/pin.yml",
+                "role": "root_control",
+                "startLine": 367
+              },
+              {
+                "endLine": 356,
+                "path": ".github/workflows/publish.yml",
+                "role": "sink",
+                "startLine": 351
+              }
+            ],
+            "provenance": {
+              "candidateId": "candidate-self-generated-upstream-checksum",
+              "source": "focused_investigator"
+            },
+            "remediation": "Require vendor signatures or independently authenticated provenance before approval; otherwise require a separate human release-author decision and validate every redirect/final artifact origin.",
+            "rootCause": {
+              "summary": "The same unattended workflow both observes untrusted release bytes and creates the checksum and approval that authorize them, so integrity is mistaken for authenticity."
+            },
+            "ruleId": "artifact-authenticity.self-derived-upstream-checksum",
+            "severity": {
+              "level": "medium",
+              "rationale": "A successful feed/artifact-origin compromise leads to project-signed malicious releases; the external-infrastructure compromise prerequisite makes likelihood uncertain rather than immediate."
+            },
+            "summary": "The pin workflow calculates SHA-256 from the same AppImages supplied by upstream infrastructure, auto-approves those values, and later signs the resulting package without an independent authenticity signal.",
+            "taxonomy": {
+              "category": "artifact-authenticity",
+              "cwe": [
+                "CWE-345"
+              ]
+            },
+            "title": "Upstream compromise is automatically converted into a signed release",
+            "validation": {
+              "counterEvidence": [
+                "The two feeds must agree, URLs are syntactically restricted, and later builds verify the committed digest, but none authenticates the initial bytes."
+              ],
+              "method": "static source trace",
+              "summary": "The workflow receives feed metadata, downloads candidate bytes, derives their only digest, writes it into the manifest, supplies approval and auto-merge, and later signs the result."
+            }
+          }
+        ],
+        "source": "focused_investigator"
+      },
+      "remediation": "Require vendor signatures or independently authenticated provenance; otherwise require an independent human release decision and validate final redirect origins.",
+      "remediationTests": [
+        "Reject candidates without independently verified authenticity.",
+        "Prevent pin automation from providing final release approval."
+      ],
+      "rootCause": {
+        "evidenceRefs": [
+          "self-hash",
+          "bot-approval",
+          "sign-output"
+        ],
+        "summary": "One unattended workflow observes upstream bytes, derives their trust data, and supplies the approval that authorizes them."
+      },
+      "ruleId": "artifact-authenticity.self-derived-upstream-checksum",
+      "severity": {
+        "level": "medium",
+        "rationale": "Feed and artifact-delivery compromise can yield project-signed malicious releases; the external compromise prerequisite leaves likelihood uncertain."
+      },
+      "summary": "Pin automation hashes the same AppImages delivered by upstream, auto-approves those digests, and later signs the package without an independent authenticity signal.",
+      "taxonomy": {
+        "category": "artifact-authenticity",
+        "cwe": [
+          "CWE-345"
+        ]
+      },
+      "title": "Upstream compromise is automatically converted into a signed release",
+      "validation": {
+        "counterEvidence": [
+          "Cross-feed agreement, host syntax checks, exact PR identity, and later digest verification provide integrity but not initial authenticity."
+        ],
+        "evidenceRefs": [
+          "self-hash",
+          "bot-approval",
+          "sign-output"
+        ],
+        "method": "static source trace",
+        "summary": "Candidate downloads become committed pins, receive bot approval/auto-merge, and later reach project signing."
+      }
+    },
+    {
+      "attackPath": {
+        "dataflow": {
+          "evidenceRefs": [
+            "main-entry",
+            "new-version-proceed",
+            "release-authority"
+          ],
+          "outcome": "unintended signed release",
+          "sink": "signing and publication authority",
+          "source": "ordinary merged contribution",
+          "summary": "main merge -> validate/X3 -> version gate -> release job"
+        },
+        "impact": {
+          "level": "high",
+          "why": "Contributor-controlled executable content can be publicly endorsed."
+        },
+        "likelihood": {
+          "level": "medium",
+          "why": "A maintainer must merge the change, but no release-specific approval is required."
+        },
+        "reachability": {
+          "attacker": "contributor lacking separate release authority",
+          "entrypoint": "ordinary main-branch merge",
+          "outcome": "signed public release",
+          "summary": "Requires merge plus successful validation and X3."
+        },
+        "summary": "Land a reviewed main change with a higher version and functional payload; the automatic chain signs and deploys it."
+      },
+      "codeEvidence": [
+        {
+          "code": "on:\n  push:\n    branches: [main]\n  pull_request: {}\n  workflow_dispatch: {}",
+          "endLine": 23,
+          "explanation": "Ordinary merged contributions and pin merges enter the same release chain.",
+          "id": "main-entry",
+          "label": "All main pushes validate",
+          "language": "yaml",
+          "path": ".github/workflows/validate.yml",
+          "role": "entrypoint",
+          "startLine": 19
+        },
+        {
+          "code": "if [ \"${MODE}\" = \"auto\" ] && [ \"${IS_NEW}\" != \"true\" ]; then\n  echo \"proceed=false\" >> \"${GITHUB_OUTPUT}\"\n  exit 0\nfi\necho \"proceed=true\" >> \"${GITHUB_OUTPUT}\"\necho \"sha=${SHA}\" >> \"${GITHUB_OUTPUT}\"\necho \"version=${VERSION}\" >> \"${GITHUB_OUTPUT}\"",
+          "endLine": 249,
+          "explanation": "A generic successful main chain plus newer version becomes sufficient release authorization.",
+          "id": "new-version-proceed",
+          "label": "Version newness sets publication decision",
+          "language": "shell",
+          "path": ".github/workflows/publish.yml",
+          "role": "root_control",
+          "startLine": 235
+        },
+        {
+          "code": "release:\n  needs: [decide, build-x86_64, build-aarch64]\n  if: ${{ needs.decide.outputs.proceed == 'true' }}\n  permissions:\n    contents: write\n    pages: write\n    id-token: write\n  environment:\n    name: github-pages",
+          "endLine": 311,
+          "explanation": "The decision grants release mutation, Pages, and OIDC authority.",
+          "id": "release-authority",
+          "label": "Decision unlocks privileged release job",
+          "language": "yaml",
+          "path": ".github/workflows/publish.yml",
+          "role": "sink",
+          "startLine": 302
+        }
+      ],
+      "confidence": {
+        "level": "high",
+        "rationale": "The gate checks event, branch, SHA, tests, and version but no release-specific provenance."
+      },
+      "findingId": "csf_20459427e20e91f6c8db2639",
+      "fingerprints": {
+        "algorithm": "codex-security/v1",
+        "primary": "codex-security/v1:sha256:9e00a3a5f92bf84ec774a963a8b6e7ab7bffdf5b75f6e04b3189f6ce37d99490"
+      },
+      "identity": {
+        "anchor": "an-ordinary-main-branch-merge-can-authorize-a-privileged-release"
+      },
+      "locations": [
+        {
+          "endLine": 23,
+          "path": ".github/workflows/validate.yml",
+          "role": "entrypoint",
+          "startLine": 19
+        },
+        {
+          "endLine": 174,
+          "path": ".github/workflows/publish.yml",
+          "role": "root_control",
+          "startLine": 141
+        },
+        {
+          "endLine": 249,
+          "path": ".github/workflows/publish.yml",
+          "role": "root_control",
+          "startLine": 221
+        },
+        {
+          "endLine": 311,
+          "path": ".github/workflows/publish.yml",
+          "role": "sink",
+          "startLine": 302
+        }
+      ],
+      "occurrenceId": "occ_40bbfeb11a4c47ca5f10c5c7",
+      "preventiveControls": [
+        "Separate quality validation from release authorization."
+      ],
+      "provenance": {
+        "candidateId": "candidate-main-version-release",
+        "previousFindings": [
+          {
+            "attackPath": {
+              "dataflow": {
+                "summary": "merged main commit -> validate -> X3 -> numeric version gate -> privileged release job"
+              },
+              "reachability": {
+                "attacker": "contributor without separate release authority",
+                "entrypoint": "ordinary pull request merged to main",
+                "outcome": "commit is signed and published as a release",
+                "summary": "Requires a main-branch merge and payload that passes repository tests and X3."
+              },
+              "summary": "Land an ordinary reviewed main change that raises the pin version and supplies a functional payload, then let the automatic validate/X3/publish chain sign and deploy it."
+            },
+            "confidence": {
+              "level": "high",
+              "rationale": "The workflow gates inspect branch, event, SHA, test success, and numeric version, but contain no pin-PR provenance or separate release approval check."
+            },
+            "identity": {
+              "anchor": "an-ordinary-main-branch-merge-can-authorize-a-privileged-release"
+            },
+            "locations": [
+              {
+                "endLine": 23,
+                "path": ".github/workflows/validate.yml",
+                "role": "entrypoint",
+                "startLine": 19
+              },
+              {
+                "endLine": 174,
+                "path": ".github/workflows/publish.yml",
+                "role": "root_control",
+                "startLine": 141
+              },
+              {
+                "endLine": 249,
+                "path": ".github/workflows/publish.yml",
+                "role": "propagation",
+                "startLine": 221
+              },
+              {
+                "endLine": 427,
+                "path": ".github/workflows/publish.yml",
+                "role": "sink",
+                "startLine": 302
+              }
+            ],
+            "provenance": {
+              "candidateId": "candidate-main-version-release",
+              "source": "focused_investigator"
+            },
+            "remediation": "Bind automatic publication to an immutable release-intent record for the exact pin PR merge and allowed-file diff, or require protected release-author approval for the exact SHA and digests.",
+            "rootCause": {
+              "summary": "The publication authorization predicate conflates successful validation of a main commit and a newer version string with approval to use signing, release, and Pages authority."
+            },
+            "ruleId": "release-authorization.main-version-bump",
+            "severity": {
+              "level": "medium",
+              "rationale": "A contributor whose ordinary change is merged can cause a signed Pages and GitHub release; exploitation still requires review/merge and passing dual-architecture validation and X3."
+            },
+            "summary": "Automatic publication treats any successful main push with a numerically newer `data/pins.yml` version as release intent, without proving that the commit came from the protected pin workflow or a release-author approval.",
+            "taxonomy": {
+              "category": "missing-authorization",
+              "cwe": [
+                "CWE-862"
+              ]
+            },
+            "title": "An ordinary main-branch merge can authorize a privileged release",
+            "validation": {
+              "counterEvidence": [
+                "Exact-SHA binding and dual-architecture gates prevent stale or failing commits but do not establish release intent."
+              ],
+              "method": "static source trace",
+              "summary": "Every main push validates; successful X3 chains enter publish, where version newness alone sets `proceed=true` for automatic publication."
+            }
+          },
+          {
+            "attackPath": {
+              "dataflow": {
+                "summary": "merged main commit -> validate -> X3 -> numeric version gate -> privileged release job"
+              },
+              "reachability": {
+                "attacker": "contributor without separate release authority",
+                "entrypoint": "ordinary pull request merged to main",
+                "outcome": "commit is signed and published as a release",
+                "summary": "Requires a main-branch merge and payload that passes repository tests and X3."
+              },
+              "summary": "Land an ordinary reviewed main change that raises the pin version and supplies a functional payload, then let the automatic validate/X3/publish chain sign and deploy it."
+            },
+            "confidence": {
+              "level": "high",
+              "rationale": "The workflow gates inspect branch, event, SHA, test success, and numeric version, but contain no pin-PR provenance or separate release approval check."
+            },
+            "locations": [
+              {
+                "endLine": 23,
+                "path": ".github/workflows/validate.yml",
+                "role": "entrypoint",
+                "startLine": 19
+              },
+              {
+                "endLine": 174,
+                "path": ".github/workflows/publish.yml",
+                "role": "root_control",
+                "startLine": 141
+              },
+              {
+                "endLine": 249,
+                "path": ".github/workflows/publish.yml",
+                "role": "propagation",
+                "startLine": 221
+              },
+              {
+                "endLine": 427,
+                "path": ".github/workflows/publish.yml",
+                "role": "sink",
+                "startLine": 302
+              }
+            ],
+            "provenance": {
+              "candidateId": "candidate-main-version-release",
+              "source": "focused_investigator"
+            },
+            "remediation": "Bind automatic publication to an immutable release-intent record for the exact pin PR merge and allowed-file diff, or require protected release-author approval for the exact SHA and digests.",
+            "rootCause": {
+              "summary": "The publication authorization predicate conflates successful validation of a main commit and a newer version string with approval to use signing, release, and Pages authority."
+            },
+            "ruleId": "release-authorization.main-version-bump",
+            "severity": {
+              "level": "medium",
+              "rationale": "A contributor whose ordinary change is merged can cause a signed Pages and GitHub release; exploitation still requires review/merge and passing dual-architecture validation and X3."
+            },
+            "summary": "Automatic publication treats any successful main push with a numerically newer `data/pins.yml` version as release intent, without proving that the commit came from the protected pin workflow or a release-author approval.",
+            "taxonomy": {
+              "category": "missing-authorization",
+              "cwe": [
+                "CWE-862"
+              ]
+            },
+            "title": "An ordinary main-branch merge can authorize a privileged release",
+            "validation": {
+              "counterEvidence": [
+                "Exact-SHA binding and dual-architecture gates prevent stale or failing commits but do not establish release intent."
+              ],
+              "method": "static source trace",
+              "summary": "Every main push validates; successful X3 chains enter publish, where version newness alone sets `proceed=true` for automatic publication."
+            }
+          }
+        ],
+        "source": "focused_investigator"
+      },
+      "remediation": "Bind publication to exact approved pin-PR provenance and an allowed-file diff, or require protected release-author approval for the exact SHA and digests.",
+      "remediationTests": [
+        "Ensure ordinary version-bump commits cannot set `proceed=true`.",
+        "Require exact release-intent provenance before privileged jobs."
+      ],
+      "rootCause": {
+        "evidenceRefs": [
+          "main-entry",
+          "new-version-proceed",
+          "release-authority"
+        ],
+        "summary": "Successful validation plus numeric version newness is incorrectly treated as explicit authorization to publish."
+      },
+      "ruleId": "release-authorization.main-version-bump",
+      "severity": {
+        "level": "medium",
+        "rationale": "A merged contributor change can trigger signed public release, but must pass review, merge, dual-architecture validation, and X3."
+      },
+      "summary": "Any successful main push with a newer numeric pin version can become release intent without proof that it came from the pin workflow or a release-author approval.",
+      "taxonomy": {
+        "category": "missing-authorization",
+        "cwe": [
+          "CWE-862"
+        ]
+      },
+      "title": "An ordinary main-branch merge can authorize a privileged release",
+      "validation": {
+        "counterEvidence": [
+          "Exact-SHA and dual-architecture checks ensure quality and identity but not release intent."
+        ],
+        "evidenceRefs": [
+          "main-entry",
+          "new-version-proceed",
+          "release-authority"
+        ],
+        "limitations": [
+          "External branch and environment protection are unverified."
+        ],
+        "method": "static source trace",
+        "summary": "No pin-PR identity, allowed-file diff, signed intent record, or release-author approval exists in the automatic gate."
+      }
+    },
+    {
+      "attackPath": {
+        "dataflow": {
+          "evidenceRefs": [
+            "mutable-secret-action",
+            "mutable-pages"
+          ],
+          "outcome": "credentials or release output compromised",
+          "sink": "privileged CI job",
+          "source": "compromised action publisher",
+          "summary": "mutable tag -> action code -> secrets or Pages authority"
+        },
+        "impact": {
+          "level": "high",
+          "why": "App credentials, signing state, or Pages output may be compromised."
+        },
+        "likelihood": {
+          "level": "low",
+          "why": "The publishers are GitHub-maintained."
+        },
+        "reachability": {
+          "attacker": "compromised action publisher",
+          "entrypoint": "workflow `uses:` reference",
+          "outcome": "privileged CI execution",
+          "summary": "Requires upstream action tag compromise."
+        },
+        "summary": "Move or compromise an accepted action tag; replacement code runs in the next privileged workflow."
+      },
+      "codeEvidence": [
+        {
+          "code": "- name: Mint GitHub App installation token\n  uses: actions/create-github-app-token@v1\n  with:\n    app-id: ${{ secrets.APP_ID }}\n    private-key: ${{ secrets.APP_PRIVATE_KEY }}",
+          "endLine": 76,
+          "explanation": "Code selected by mutable `v1` directly receives the App private key.",
+          "id": "mutable-secret-action",
+          "label": "Mutable action receives App private key",
+          "language": "yaml",
+          "path": ".github/workflows/pin.yml",
+          "role": "entrypoint",
+          "startLine": 71
+        },
+        {
+          "code": "- name: Deploy the Flatpak Repository to Pages\n  uses: actions/upload-pages-artifact@v3\n  with:\n    path: site\n- name: Publish to the Pages environment\n  uses: actions/deploy-pages@v4",
+          "endLine": 427,
+          "explanation": "Mutable action code executes with Pages and OIDC permissions after signing.",
+          "id": "mutable-pages",
+          "label": "Mutable deployment actions hold publication authority",
+          "language": "yaml",
+          "path": ".github/workflows/publish.yml",
+          "role": "sink",
+          "startLine": 420
+        }
+      ],
+      "confidence": {
+        "level": "high",
+        "rationale": "The workflows visibly use only major tags at privileged boundaries."
+      },
+      "findingId": "csf_f9178d76776d0bf1b81ce83d",
+      "fingerprints": {
+        "algorithm": "codex-security/v1",
+        "primary": "codex-security/v1:sha256:75a0c8b8b618a1c60a1316262551f7690b170be4aefada51d3ccabe8df09e918"
+      },
+      "identity": {
+        "anchor": "mutable-action-tags-run-with-signing-and-publication-authority"
+      },
+      "locations": [
+        {
+          "endLine": 76,
+          "path": ".github/workflows/pin.yml",
+          "role": "entrypoint",
+          "startLine": 71
+        },
+        {
+          "endLine": 331,
+          "path": ".github/workflows/publish.yml",
+          "role": "propagation",
+          "startLine": 306
+        },
+        {
+          "endLine": 356,
+          "path": ".github/workflows/publish.yml",
+          "role": "propagation",
+          "startLine": 353
+        },
+        {
+          "endLine": 427,
+          "path": ".github/workflows/publish.yml",
+          "role": "sink",
+          "startLine": 420
+        }
+      ],
+      "occurrenceId": "occ_891a663cd6578c2a037cdd47",
+      "preventiveControls": [
+        "Automate reviewed full-SHA updates."
+      ],
+      "provenance": {
+        "candidateId": "candidate-mutable-action-tags",
+        "previousFindings": [
+          {
+            "attackPath": {
+              "dataflow": {
+                "summary": "mutable action tag -> downloaded action code -> privileged runner job -> tokens, artifacts, signing state, or Pages deployment"
+              },
+              "reachability": {
+                "attacker": "compromised action publisher",
+                "entrypoint": "workflow `uses:` reference",
+                "outcome": "release credentials or publication output are compromised",
+                "summary": "Requires compromise of an upstream GitHub-maintained action repository or its release-tag authority."
+              },
+              "summary": "Compromise or move an accepted action tag; the next workflow run executes replacement action code with the job's credentials and filesystem state."
+            },
+            "confidence": {
+              "level": "high",
+              "rationale": "All `uses:` entries are visibly major-tag references and several run in jobs that receive App credentials, GPG material, contents write, Pages write, and OIDC authority."
+            },
+            "identity": {
+              "anchor": "mutable-action-tags-run-with-signing-and-publication-authority"
+            },
+            "locations": [
+              {
+                "endLine": 76,
+                "path": ".github/workflows/pin.yml",
+                "role": "user_input",
+                "startLine": 71
+              },
+              {
+                "endLine": 331,
+                "path": ".github/workflows/publish.yml",
+                "role": "entrypoint",
+                "startLine": 306
+              },
+              {
+                "endLine": 356,
+                "path": ".github/workflows/publish.yml",
+                "role": "propagation",
+                "startLine": 353
+              },
+              {
+                "endLine": 427,
+                "path": ".github/workflows/publish.yml",
+                "role": "sink",
+                "startLine": 420
+              }
+            ],
+            "provenance": {
+              "candidateId": "candidate-mutable-action-tags",
+              "source": "focused_investigator"
+            },
+            "remediation": "Pin every action to a reviewed full commit SHA and isolate signing from artifact and Pages actions, destroying imported key material before later steps.",
+            "rootCause": {
+              "summary": "The workflows use mutable release labels instead of immutable action commits at privileged trust boundaries."
+            },
+            "ruleId": "ci-dependency.mutable-github-action-tags",
+            "severity": {
+              "level": "low",
+              "rationale": "Impact is severe, but exploitation requires compromise of GitHub-maintained action repositories or tag-publishing accounts, a constrained low-likelihood prerequisite."
+            },
+            "summary": "Secret-bearing and write-privileged jobs execute GitHub Actions referenced only by mutable major-version tags, allowing a compromised action tag to replace artifacts, misuse credentials, or capture signing material.",
+            "taxonomy": {
+              "category": "untrusted-dependency",
+              "cwe": [
+                "CWE-829"
+              ]
+            },
+            "title": "Mutable action tags run with signing and publication authority",
+            "validation": {
+              "counterEvidence": [
+                "The actions are maintained by GitHub and job permissions are explicitly scoped."
+              ],
+              "method": "static source trace",
+              "summary": "Major tags identify executable action code in the same jobs that receive privileged tokens and signing secrets."
+            }
+          },
+          {
+            "attackPath": {
+              "dataflow": {
+                "summary": "mutable action tag -> downloaded action code -> privileged runner job -> tokens, artifacts, signing state, or Pages deployment"
+              },
+              "reachability": {
+                "attacker": "compromised action publisher",
+                "entrypoint": "workflow `uses:` reference",
+                "outcome": "release credentials or publication output are compromised",
+                "summary": "Requires compromise of an upstream GitHub-maintained action repository or its release-tag authority."
+              },
+              "summary": "Compromise or move an accepted action tag; the next workflow run executes replacement action code with the job's credentials and filesystem state."
+            },
+            "confidence": {
+              "level": "high",
+              "rationale": "All `uses:` entries are visibly major-tag references and several run in jobs that receive App credentials, GPG material, contents write, Pages write, and OIDC authority."
+            },
+            "locations": [
+              {
+                "endLine": 76,
+                "path": ".github/workflows/pin.yml",
+                "role": "user_input",
+                "startLine": 71
+              },
+              {
+                "endLine": 331,
+                "path": ".github/workflows/publish.yml",
+                "role": "entrypoint",
+                "startLine": 306
+              },
+              {
+                "endLine": 356,
+                "path": ".github/workflows/publish.yml",
+                "role": "propagation",
+                "startLine": 353
+              },
+              {
+                "endLine": 427,
+                "path": ".github/workflows/publish.yml",
+                "role": "sink",
+                "startLine": 420
+              }
+            ],
+            "provenance": {
+              "candidateId": "candidate-mutable-action-tags",
+              "source": "focused_investigator"
+            },
+            "remediation": "Pin every action to a reviewed full commit SHA and isolate signing from artifact and Pages actions, destroying imported key material before later steps.",
+            "rootCause": {
+              "summary": "The workflows use mutable release labels instead of immutable action commits at privileged trust boundaries."
+            },
+            "ruleId": "ci-dependency.mutable-github-action-tags",
+            "severity": {
+              "level": "low",
+              "rationale": "Impact is severe, but exploitation requires compromise of GitHub-maintained action repositories or tag-publishing accounts, a constrained low-likelihood prerequisite."
+            },
+            "summary": "Secret-bearing and write-privileged jobs execute GitHub Actions referenced only by mutable major-version tags, allowing a compromised action tag to replace artifacts, misuse credentials, or capture signing material.",
+            "taxonomy": {
+              "category": "untrusted-dependency",
+              "cwe": [
+                "CWE-829"
+              ]
+            },
+            "title": "Mutable action tags run with signing and publication authority",
+            "validation": {
+              "counterEvidence": [
+                "The actions are maintained by GitHub and job permissions are explicitly scoped."
+              ],
+              "method": "static source trace",
+              "summary": "Major tags identify executable action code in the same jobs that receive privileged tokens and signing secrets."
+            }
+          }
+        ],
+        "source": "focused_investigator"
+      },
+      "remediation": "Pin every action to a reviewed full commit SHA and isolate signing from artifact and Pages actions.",
+      "remediationTests": [
+        "Fail CI on non-SHA `uses:` references.",
+        "Keep signing key unavailable to later reusable actions."
+      ],
+      "rootCause": {
+        "evidenceRefs": [
+          "mutable-secret-action",
+          "mutable-pages"
+        ],
+        "summary": "Privileged reusable action code is identified by mutable release labels rather than reviewed immutable commits."
+      },
+      "ruleId": "ci-dependency.mutable-github-action-tags",
+      "severity": {
+        "level": "low",
+        "rationale": "Impact is severe, but exploitation requires compromise of GitHub-maintained action repositories or tag publishers."
+      },
+      "summary": "Secret-bearing and write-privileged jobs execute actions through mutable major tags, so compromised tag authority can replace artifacts, misuse credentials, or capture signing material.",
+      "taxonomy": {
+        "category": "untrusted-dependency",
+        "cwe": [
+          "CWE-829"
+        ]
+      },
+      "title": "Mutable action tags run with signing and publication authority",
+      "validation": {
+        "counterEvidence": [
+          "The actions are GitHub-maintained and permissions are scoped."
+        ],
+        "evidenceRefs": [
+          "mutable-secret-action",
+          "mutable-pages"
+        ],
+        "limitations": [
+          "No external action compromise was investigated."
+        ],
+        "method": "static source trace",
+        "summary": "Major-tag actions receive secrets or execute inside write-privileged jobs."
+      }
+    }
+  ],
+  "scanId": "402d9b4e-b54a-4c1e-9d03-95b59ef64c4b",
+  "schemaVersion": "1.0"
+}

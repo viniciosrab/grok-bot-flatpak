@@ -1,0 +1,457 @@
+{
+  "$schema": "https://docs.oasis-open.org/sarif/sarif/v2.1.0/os/schemas/sarif-schema-2.1.0.json",
+  "runs": [
+    {
+      "automationDetails": {
+        "id": "402d9b4e-b54a-4c1e-9d03-95b59ef64c4b"
+      },
+      "invocations": [
+        {
+          "executionSuccessful": true,
+          "toolExecutionNotifications": [
+            {
+              "level": "warning",
+              "message": {
+                "text": "Awaiting validation of proprietary Electron receiver reachability."
+              }
+            },
+            {
+              "level": "warning",
+              "message": {
+                "text": "Awaiting validation of proprietary Electron receiver reachability."
+              }
+            },
+            {
+              "level": "warning",
+              "message": {
+                "text": "Awaiting validation of realistic boundary and incremental impact."
+              }
+            }
+          ]
+        }
+      ],
+      "properties": {
+        "codexSecurityCoverageCompleteness": "partial",
+        "codexSecuritySchemaVersion": "1.0",
+        "codexSecurityTargetKind": "git_revision"
+      },
+      "results": [
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/publish.yml"
+                },
+                "region": {
+                  "endLine": 174,
+                  "startLine": 141
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/validate.yml"
+                },
+                "region": {
+                  "endLine": 23,
+                  "startLine": 19
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/publish.yml"
+                },
+                "region": {
+                  "endLine": 249,
+                  "startLine": 221
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/publish.yml"
+                },
+                "region": {
+                  "endLine": 311,
+                  "startLine": 302
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence:new-version-proceed"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/publish.yml"
+                },
+                "region": {
+                  "endLine": 249,
+                  "startLine": 235
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "An ordinary main-branch merge can authorize a privileged release\n\nAny successful main push with a newer numeric pin version can become release intent without proof that it came from the pin workflow or a release-author approval.\n\nSeverity: medium\n\nCategory: Missing authorization\n\nWeaknesses: CWE-862\n\nRemediation:\nBind publication to exact approved pin-PR provenance and an allowed-file diff, or require protected release-author approval for the exact SHA and digests.\n\nRemediation tests:\n- Ensure ordinary version-bump commits cannot set `proceed=true`.\n- Require exact release-intent provenance before privileged jobs.\n\nPreventive controls:\n- Separate quality validation from release authorization."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:9e00a3a5f92bf84ec774a963a8b6e7ab7bffdf5b75f6e04b3189f6ce37d99490"
+          },
+          "properties": {
+            "category": "missing-authorization",
+            "confidence": "high",
+            "findingId": "csf_20459427e20e91f6c8db2639",
+            "occurrenceId": "occ_40bbfeb11a4c47ca5f10c5c7",
+            "severity": "medium"
+          },
+          "ruleId": "release-authorization.main-version-bump",
+          "ruleIndex": 3
+        },
+        {
+          "level": "warning",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/pin.yml"
+                },
+                "region": {
+                  "endLine": 441,
+                  "startLine": 367
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "user_input"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/pin.yml"
+                },
+                "region": {
+                  "endLine": 136,
+                  "startLine": 97
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/publish.yml"
+                },
+                "region": {
+                  "endLine": 356,
+                  "startLine": 351
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence:self-hash"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/pin.yml"
+                },
+                "region": {
+                  "endLine": 136,
+                  "startLine": 126
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence:bot-approval"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/pin.yml"
+                },
+                "region": {
+                  "endLine": 444,
+                  "startLine": 436
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Upstream compromise is automatically converted into a signed release\n\nPin automation hashes the same AppImages delivered by upstream, auto-approves those digests, and later signs the package without an independent authenticity signal.\n\nSeverity: medium\n\nCategory: Artifact authenticity\n\nWeaknesses: CWE-345\n\nRemediation:\nRequire vendor signatures or independently authenticated provenance; otherwise require an independent human release decision and validate final redirect origins.\n\nRemediation tests:\n- Reject candidates without independently verified authenticity.\n- Prevent pin automation from providing final release approval.\n\nPreventive controls:\n- Bind provenance to version, commit, architecture, URL, and digest."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:d09d0899e7a877cb4ceae7e89d514494fbbad38f18f75165741f7d1736c3f77e"
+          },
+          "properties": {
+            "category": "artifact-authenticity",
+            "confidence": "high",
+            "findingId": "csf_47b6efedb3af8a422a230b4d",
+            "occurrenceId": "occ_7203b3d3b8da11d87376d2dd",
+            "severity": "medium"
+          },
+          "ruleId": "artifact-authenticity.self-derived-upstream-checksum",
+          "ruleIndex": 1
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "entrypoint"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/pin.yml"
+                },
+                "region": {
+                  "endLine": 76,
+                  "startLine": 71
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "propagation"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/publish.yml"
+                },
+                "region": {
+                  "endLine": 331,
+                  "startLine": 306
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "propagation"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/publish.yml"
+                },
+                "region": {
+                  "endLine": 356,
+                  "startLine": 353
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "sink"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/publish.yml"
+                },
+                "region": {
+                  "endLine": 427,
+                  "startLine": 420
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Mutable action tags run with signing and publication authority\n\nSecret-bearing and write-privileged jobs execute actions through mutable major tags, so compromised tag authority can replace artifacts, misuse credentials, or capture signing material.\n\nSeverity: low\n\nCategory: Untrusted dependency\n\nWeaknesses: CWE-829\n\nRemediation:\nPin every action to a reviewed full commit SHA and isolate signing from artifact and Pages actions.\n\nRemediation tests:\n- Fail CI on non-SHA `uses:` references.\n- Keep signing key unavailable to later reusable actions.\n\nPreventive controls:\n- Automate reviewed full-SHA updates."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:75a0c8b8b618a1c60a1316262551f7690b170be4aefada51d3ccabe8df09e918"
+          },
+          "properties": {
+            "category": "untrusted-dependency",
+            "confidence": "high",
+            "findingId": "csf_f9178d76776d0bf1b81ce83d",
+            "occurrenceId": "occ_891a663cd6578c2a037cdd47",
+            "severity": "low"
+          },
+          "ruleId": "ci-dependency.mutable-github-action-tags",
+          "ruleIndex": 2
+        },
+        {
+          "level": "note",
+          "locations": [
+            {
+              "message": {
+                "text": "root_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "README.md"
+                },
+                "region": {
+                  "endLine": 27,
+                  "startLine": 16
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "expected_control"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": ".github/workflows/publish.yml"
+                },
+                "region": {
+                  "endLine": 356,
+                  "startLine": 353
+                }
+              }
+            },
+            {
+              "message": {
+                "text": "evidence:install-no-gpg"
+              },
+              "physicalLocation": {
+                "artifactLocation": {
+                  "uri": "README.md"
+                },
+                "region": {
+                  "endLine": 17,
+                  "startLine": 16
+                }
+              }
+            }
+          ],
+          "message": {
+            "text": "Users install updates without verifying the repository signature\n\nThe production instructions add the Pages Flatpak remote with `--no-gpg-verify`, so a compromised publication origin can substitute application updates despite repository signing.\n\nSeverity: low\n\nCategory: Artifact authenticity\n\nWeaknesses: CWE-494\n\nRemediation:\nPublish the repository public key through an authenticated channel, remove `--no-gpg-verify`, and migrate existing remotes.\n\nRemediation tests:\n- Reject production setup instructions containing `--no-gpg-verify`.\n- Verify modified repository metadata or objects are rejected.\n\nPreventive controls:\n- Publish a key-bearing `.flatpakrepo` descriptor."
+          },
+          "partialFingerprints": {
+            "codexSecurity/v1": "codex-security/v1:sha256:e46a0e6d1d5c58944c983c76cc756da30d549243eb942442f2c45e4ee69f1c64"
+          },
+          "properties": {
+            "category": "artifact-authenticity",
+            "confidence": "high",
+            "findingId": "csf_d91ece76c67571e4c8f4a124",
+            "occurrenceId": "occ_cdf92c80bf07a26dd24f6524",
+            "severity": "low"
+          },
+          "ruleId": "artifact-authenticity.flatpak-gpg-verification-disabled",
+          "ruleIndex": 0
+        }
+      ],
+      "tool": {
+        "driver": {
+          "name": "Codex Security",
+          "rules": [
+            {
+              "fullDescription": {
+                "text": "Artifact authenticity: Flatpak gpg verification disabled. Categories: Artifact authenticity. Weaknesses: CWE-494."
+              },
+              "help": {
+                "markdown": "Artifact authenticity: Flatpak gpg verification disabled. Categories: Artifact authenticity. Weaknesses: CWE-494.\n\n## Remediation\n\nPublish the repository public key through an authenticated channel, remove `--no-gpg-verify`, and migrate existing remotes.",
+                "text": "Artifact authenticity: Flatpak gpg verification disabled. Categories: Artifact authenticity. Weaknesses: CWE-494.\n\nRemediation:\n\nPublish the repository public key through an authenticated channel, remove `--no-gpg-verify`, and migrate existing remotes."
+              },
+              "id": "artifact-authenticity.flatpak-gpg-verification-disabled",
+              "name": "Artifact authenticity: Flatpak gpg verification disabled",
+              "properties": {
+                "security-severity": "2.0",
+                "tags": [
+                  "artifact-authenticity",
+                  "external/cwe/cwe-494",
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "Artifact authenticity: Flatpak gpg verification disabled"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Artifact authenticity: Self derived upstream checksum. Categories: Artifact authenticity. Weaknesses: CWE-345."
+              },
+              "help": {
+                "markdown": "Artifact authenticity: Self derived upstream checksum. Categories: Artifact authenticity. Weaknesses: CWE-345.\n\n## Remediation\n\nRequire vendor signatures or independently authenticated provenance; otherwise require an independent human release decision and validate final redirect origins.",
+                "text": "Artifact authenticity: Self derived upstream checksum. Categories: Artifact authenticity. Weaknesses: CWE-345.\n\nRemediation:\n\nRequire vendor signatures or independently authenticated provenance; otherwise require an independent human release decision and validate final redirect origins."
+              },
+              "id": "artifact-authenticity.self-derived-upstream-checksum",
+              "name": "Artifact authenticity: Self derived upstream checksum",
+              "properties": {
+                "security-severity": "5.0",
+                "tags": [
+                  "artifact-authenticity",
+                  "external/cwe/cwe-345",
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "Artifact authenticity: Self derived upstream checksum"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Ci dependency: Mutable github action tags. Categories: Untrusted dependency. Weaknesses: CWE-829."
+              },
+              "help": {
+                "markdown": "Ci dependency: Mutable github action tags. Categories: Untrusted dependency. Weaknesses: CWE-829.\n\n## Remediation\n\nPin every action to a reviewed full commit SHA and isolate signing from artifact and Pages actions.",
+                "text": "Ci dependency: Mutable github action tags. Categories: Untrusted dependency. Weaknesses: CWE-829.\n\nRemediation:\n\nPin every action to a reviewed full commit SHA and isolate signing from artifact and Pages actions."
+              },
+              "id": "ci-dependency.mutable-github-action-tags",
+              "name": "Ci dependency: Mutable github action tags",
+              "properties": {
+                "security-severity": "2.0",
+                "tags": [
+                  "external/cwe/cwe-829",
+                  "security",
+                  "untrusted-dependency"
+                ]
+              },
+              "shortDescription": {
+                "text": "Ci dependency: Mutable github action tags"
+              }
+            },
+            {
+              "fullDescription": {
+                "text": "Release authorization: Main version bump. Categories: Missing authorization. Weaknesses: CWE-862."
+              },
+              "help": {
+                "markdown": "Release authorization: Main version bump. Categories: Missing authorization. Weaknesses: CWE-862.\n\n## Remediation\n\nBind publication to exact approved pin-PR provenance and an allowed-file diff, or require protected release-author approval for the exact SHA and digests.",
+                "text": "Release authorization: Main version bump. Categories: Missing authorization. Weaknesses: CWE-862.\n\nRemediation:\n\nBind publication to exact approved pin-PR provenance and an allowed-file diff, or require protected release-author approval for the exact SHA and digests."
+              },
+              "id": "release-authorization.main-version-bump",
+              "name": "Release authorization: Main version bump",
+              "properties": {
+                "security-severity": "5.0",
+                "tags": [
+                  "external/cwe/cwe-862",
+                  "missing-authorization",
+                  "security"
+                ]
+              },
+              "shortDescription": {
+                "text": "Release authorization: Main version bump"
+              }
+            }
+          ],
+          "version": "0.1.95"
+        }
+      }
+    }
+  ],
+  "version": "2.1.0"
+}

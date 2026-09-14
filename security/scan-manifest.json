@@ -1,0 +1,93 @@
+{
+  "documentType": "codex-security.scan-manifest",
+  "scan": {
+    "artifacts": [
+      {
+        "mediaType": "application/json",
+        "path": "findings.json",
+        "sha256": "62cad0e443829204463ed415d5634168c7363bf9c71e3466c68b83338b6e093c"
+      },
+      {
+        "mediaType": "application/json",
+        "path": "coverage.json",
+        "sha256": "674254a8859861a75b46fe86fa4fb0fb0e5ce17a45713c16c733e400e0bc773a"
+      }
+    ],
+    "completedAt": "2026-09-14T00:34:26.347467Z",
+    "coverageRef": "coverage.json",
+    "findingsRef": "findings.json",
+    "id": "402d9b4e-b54a-4c1e-9d03-95b59ef64c4b",
+    "preservedSources": {
+      "checkpoints/013f244c563d270c5e42e13d71df73f2d6ba4e9e465235c4f5a9ed2c1d13985c.json": "d6dfbac6a2dc5b37a2f21dff8ba229f46d71966144c380087d394017402169fa",
+      "checkpoints/03e608637712df9cd2834f713fc44848a9a7dce2ebeacb48cf22a44d15ef0b5c.json": "bbb66ac21020e4601a63758315ed086bd6a9dcfa872d42cae7fb15f0bfaf8b27",
+      "checkpoints/18a8bbbfb74f39522f863e23e1683ba8296df7b27cc0f68bdab162d0cc79e491.json": "9e5459926c86c757e984bfd4398d2bae644a10e6f25b79579c5c08540de4707d",
+      "checkpoints/690348ac3e00fdbc2837e7e20e9ee9c0d7aadd99a23f40bc287f39f53335258d.json": "9f97a849b525c1d91af2bc2ecdb7929c75d72c74daff31d569ba9676bac22475",
+      "checkpoints/a912cade54dc55ff000d18999fd1c8afc499af547c9001432938c06b50f43b01.json": "a912cade54dc55ff000d18999fd1c8afc499af547c9001432938c06b50f43b01"
+    },
+    "producer": {
+      "name": "codex-security-plugin",
+      "version": "0.1.95"
+    },
+    "scope": {
+      "artifactsReviewed": [
+        "63 Git-tracked files"
+      ],
+      "excludePaths": [],
+      "includePaths": [
+        "."
+      ],
+      "limitations": [
+        "Proprietary upstream Electron source and external GitHub settings were absent."
+      ],
+      "runtimeStatus": "SDK-owned non-interactive Standard scan",
+      "summary": "Complete static security review of all 63 Git-tracked files.",
+      "validationMode": "baseline, architecture review, focused investigation, and parent validation"
+    },
+    "sealedAt": "2026-09-14T00:34:26.347467Z",
+    "startedAt": "2026-09-14T00:19:29.601247Z",
+    "status": "completed",
+    "target": {
+      "displayName": "grok-bot-flatpak",
+      "kind": "git_revision",
+      "revision": "1264bab662f9902f2074ae2317a9ae06d1f99394",
+      "targetId": "target_sha256_3022e7e2ab058c823818a0c5eb3243e8dc40ca077d8e4d67e481b1ca341d73ab"
+    },
+    "threatModel": {
+      "assets": [
+        "Upstream AppImage and published Flatpak integrity.",
+        "GPG, GitHub App, workflow-token, release, and Pages authority.",
+        "User session and protocol callback data.",
+        "Flatpak sandbox permissions."
+      ],
+      "assumptions": [
+        "Entire current 63-file Git repository was reviewed.",
+        "No SECURITY.md, supplied threat model, scoped inventory, or knowledge base was provided.",
+        "Proprietary Electron internals and external GitHub settings are unverified.",
+        "HTTPS remains effective while the authenticated origin is uncompromised."
+      ],
+      "attackerCapabilities": [
+        "Compromised upstream infrastructure controls candidate metadata and bytes but not project signing.",
+        "A merged contributor lacks separate release authority.",
+        "A publication-origin attacker can replace served content after origin compromise.",
+        "A compromised action publisher can change mutable-tag code.",
+        "Same-user local processes can influence per-user state, but a stronger callback-disclosure boundary is unproven."
+      ],
+      "securityObjectives": [
+        "Independently authenticate upstream executables.",
+        "Bind explicit release intent to exact SHA and digests.",
+        "Pin and isolate privileged CI dependencies.",
+        "Require client verification of repository signatures.",
+        "Preserve protocol and Flatpak boundaries."
+      ],
+      "summary": "Unofficial dual-architecture Grok Bot Flatpak packaging with a Qt/KF6 protocol companion and privileged CI for upstream pinning, validation, signing, GitHub Releases, Pages deployment, and rollback. The proprietary Electron implementation is absent.",
+      "trustBoundaries": [
+        "Upstream feeds and artifact delivery enter unattended pin automation.",
+        "Merged main commits enter validation and automatic release decisions.",
+        "The release job imports signing authority and deploys Pages.",
+        "Users consume the Pages remote with GPG verification disabled.",
+        "Protocol URLs cross from the desktop into the companion and absent proprietary Electron receiver."
+      ]
+    }
+  },
+  "schemaVersion": "1.0"
+}
