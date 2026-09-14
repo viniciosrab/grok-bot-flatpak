@@ -353,6 +353,46 @@ jobs:
           printf '%s' "${GPG_KEY}" | gpg --import
           KEY_ID="$(gpg --list-secret-keys --with-colons | awk -F: '/^sec:/ {print $5; exit}')"
           test -n "${KEY_ID}" || { echo "no GPG signing key available" >&2; exit 1; }
+          # BEGIN sign every published commit (executed verbatim by tests in an ephemeral OSTree harness; keep self-contained: needs ./site and KEY_ID in env; signs each distinct ref commit with ostree gpg-sign).
+          REFS="$(ostree refs --repo=site)"
+          test -n "${REFS}" || { echo "no refs in site repo; refusing to publish unsigned commits" >&2; exit 1; }
+          KEY_COUNT="$(gpg --list-secret-keys --with-colons | grep -c '^sec:')"
+          test "${KEY_COUNT}" = "1" || { echo "ambiguous GPG signing keys (count=${KEY_COUNT}); failing closed" >&2; exit 1; }
+          test -n "${KEY_ID:-}" || { echo "no GPG signing key available" >&2; exit 1; }
+          SIGNED_LIST="$(mktemp)"
+          : > "${SIGNED_LIST}"
+          while IFS= read -r REF; do
+            case "${REF}" in
+              ""|*[[:space:]]*)
+                echo "malformed ref '${REF}'; failing closed" >&2
+                exit 1
+                ;;
+            esac
+            COMMIT="$(ostree rev-parse --repo=site "${REF}")" || { echo "failed to resolve ref ${REF}" >&2; exit 1; }
+            case "${COMMIT}" in
+              *[!0-9a-f]*|"")
+                echo "malformed commit ID '${COMMIT}' for ref ${REF}; failing closed" >&2
+                exit 1
+                ;;
+            esac
+            if [ "${#COMMIT}" -ne 64 ]; then
+              echo "malformed commit ID '${COMMIT}' for ref ${REF}; failing closed" >&2
+              exit 1
+            fi
+            if grep -Fxq "${COMMIT}" "${SIGNED_LIST}"; then
+              continue
+            fi
+            printf '%s\n' "${COMMIT}" >> "${SIGNED_LIST}"
+            ostree gpg-sign --repo=site "${COMMIT}" "${KEY_ID}" || { echo "failed to sign commit ${COMMIT} for ref ${REF}" >&2; exit 1; }
+            SIGS="$(ostree show --repo=site --list-detached-metadata-keys "${COMMIT}")" || { echo "missing signatures for commit ${COMMIT} (ref ${REF})" >&2; exit 1; }
+            case "${SIGS}" in
+              *ostree.gpgsigs*) ;;
+              *) echo "missing signatures for commit ${COMMIT} (ref ${REF})" >&2; exit 1 ;;
+            esac
+          done <<< "${REFS}"
+          test -s "${SIGNED_LIST}" || { echo "no ref commits signed; failing closed" >&2; exit 1; }
+          rm -f "${SIGNED_LIST}"
+          # END sign every published commit.
           flatpak build-update-repo --prune --gpg-sign="${KEY_ID}" site
           gpg --export "${KEY_ID}" > "${RUNNER_TEMP}/grok-bot.gpg"
           test -s "${RUNNER_TEMP}/grok-bot.gpg" || { echo "failed to export repository public key" >&2; exit 1; }
@@ -369,6 +409,26 @@ jobs:
           test -s site/grok-bot.flatpakrepo || { echo "failed to write grok-bot.flatpakrepo" >&2; exit 1; }
           grep -q '^GPGKey=' site/grok-bot.flatpakrepo || { echo "grok-bot.flatpakrepo is missing GPGKey" >&2; exit 1; }
           cp "${RUNNER_TEMP}/grok-bot.gpg" site/grok-bot.gpg
+          PUBKEY="${RUNNER_TEMP}/grok-bot.gpg"
+          # BEGIN consumer commit verification (executed verbatim by tests in an ephemeral OSTree harness; keep self-contained: needs ./site and PUBKEY in env pointing at the exported public key; proves each ref commit verifies with GPG using only that key).
+          test -n "${PUBKEY:-}" || { echo "missing public key path for consumer verification" >&2; exit 1; }
+          test -s "${PUBKEY}" || { echo "missing public key for consumer verification" >&2; exit 1; }
+          VERIFY_REPO="$(mktemp -d)/verify"
+          ostree init --repo="${VERIFY_REPO}" --mode=bare-user-only || { echo "failed to init verification repo" >&2; exit 1; }
+          ostree remote add --repo="${VERIFY_REPO}" verify-local "file://${PWD}/site" --gpg-import="${PUBKEY}" || { echo "failed to add verification remote" >&2; exit 1; }
+          VERIFY_REFS="$(ostree refs --repo=site)" || { echo "failed to list site refs for verification" >&2; exit 1; }
+          test -n "${VERIFY_REFS}" || { echo "no refs to verify; failing closed" >&2; exit 1; }
+          while IFS= read -r VREF; do
+            case "${VREF}" in
+              ""|*[[:space:]]*)
+                echo "malformed ref '${VREF}' during verification; failing closed" >&2
+                exit 1
+                ;;
+            esac
+            ostree pull --repo="${VERIFY_REPO}" --commit-metadata-only --depth=0 verify-local "${VREF}" || { echo "consumer verification failed for ref ${VREF}: missing or invalid commit signature" >&2; exit 1; }
+          done <<< "${VERIFY_REFS}"
+          rm -rf "$(dirname "${VERIFY_REPO}")"
+          # END consumer commit verification.
           tar -czf site.tar.gz site
 
       - name: Tag the internal build for audit and rollback
