@@ -175,6 +175,12 @@ def decide(request: DecideInput) -> Decision:
     is_new = is_new_version(version, request.raw_tags)
     if mode == "auto" and not is_new:
         return Decision(False, sha, version, "auto", False)
+    if mode == "manual" and not is_new:
+        published = collect_published_versions(request.raw_tags)
+        if version not in published:
+            raise PublishDecisionError(
+                f"manual publish version {version} is older than the highest published version"
+            )
     return Decision(True, sha, version, mode, is_new)
 
 

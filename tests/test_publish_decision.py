@@ -183,6 +183,10 @@ class ManualIntentTests(unittest.TestCase):
         with self.assertRaises(PublishDecisionError):
             decide(DecideInput(**kwargs))
 
+    def test_manual_older_version_fails_closed(self):
+        with self.assertRaises(PublishDecisionError):
+            decide(manual_input(version="0.46.0", tags=["v0.47.0"]))
+
     def test_manual_same_version_proceeds_not_new(self):
         decision = decide(manual_input(version="0.47.0", tags=["v0.47.0"]))
         self.assertTrue(decision.proceed)
@@ -190,6 +194,14 @@ class ManualIntentTests(unittest.TestCase):
         self.assertFalse(decision.is_new)
         self.assertEqual(decision.sha, SHA)
         self.assertEqual(decision.version, "0.47.0")
+
+    def test_manual_newer_version_proceeds_new(self):
+        decision = decide(manual_input(version="0.48.0", tags=["v0.47.0"]))
+        self.assertTrue(decision.proceed)
+        self.assertEqual(decision.mode, "manual")
+        self.assertTrue(decision.is_new)
+        self.assertEqual(decision.sha, SHA)
+        self.assertEqual(decision.version, "0.48.0")
 
     def test_bounded_outputs_only(self):
         decision = decide(manual_input())
