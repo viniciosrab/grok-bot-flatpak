@@ -13,9 +13,17 @@ find_package(KF6WindowSystem REQUIRED)
 # without Qt6 Widgets/DBus, KF6StatusNotifierItem, or KF6WindowSystem must
 # error out here, never silently skip the production companion target.
 
+add_library(grok-bot-lifecycle STATIC
+  src/lifecycle_helpers.cpp
+)
+target_compile_features(grok-bot-lifecycle PUBLIC cxx_std_17)
+target_include_directories(grok-bot-lifecycle PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(grok-bot-lifecycle PUBLIC Qt6::Core)
+
 add_executable(grok-bot-companion src/main.cpp)
 
 target_link_libraries(grok-bot-companion PRIVATE
+  grok-bot-lifecycle
   Qt6::Widgets
   Qt6::DBus
   KF6::StatusNotifierItem
@@ -23,8 +31,8 @@ target_link_libraries(grok-bot-companion PRIVATE
 
 install(TARGETS grok-bot-companion RUNTIME DESTINATION bin)
 
-# Compiled lifecycle probes around the internal helpers (real temporary
-# Unix sockets plus owned child processes with bounded timeouts; no
+# Compiled lifecycle probes over the shared production helper module (real
+# temporary Unix sockets plus owned child processes with bounded timeouts; no
 # fixture adapters). See tests/ for the seam rationale.
 add_subdirectory(tests)
 

@@ -137,6 +137,72 @@ SIGTERM_QUIT_BRIDGE_REPLACE = (
 # before-quit daemon drain.
 RELAUNCH_QUIT_FIND = b"ye.app.relaunch(),ye.app.quit()"
 RELAUNCH_QUIT_REPLACE = b"ye.app.relaunch(),ye.app.exit()"
+# Exact anchors for the currently pinned 0.51.0 payload. These are captured
+# from the packed x86_64 and aarch64 app.asar members. The archive bytes differ
+# elsewhere by architecture, but these approved member-local anchors are
+# identical; membership remains exact and fail-closed.
+CURRENT_CONTROLS_FIND = (
+    b'if(c==="darwin")return null;if(c==="win32"){let W;'
+    b'e[12]===Symbol.for("react.memo_cache_sentinel")?(W={display:"none"},'
+    b'e[12]=W):W=e[12];let Y;return e[13]!==w?'
+    b'(Y=f.jsx("div",{"aria-hidden":!0,className:"sand-window-controls",'
+    b'ref:w,style:W}),e[13]=w,e[14]=Y):Y=e[14],Y}'
+    b'if(o)return null;let C,A,E,R,N;if(e[15]!==r)'
+)
+CURRENT_CONTROLS_REPLACE = CURRENT_CONTROLS_FIND.replace(
+    b"if(o)return null", b"if(1)return null", 1
+)
+CURRENT_CLOSE_FIND = (
+    b's.on("closed",()=>{Dh.markRendererNotReady()});let c=AP({window:TP(s),'
+    b'app:{onceBeforeQuit:d=>he.app.once("before-quit",d)}})'
+)
+CURRENT_CLOSE_REPLACE = (
+    b's.on("closed",()=>{Dh.markRendererNotReady()}),'
+    b's.on("close",e=>{he.app.quitting||(e.preventDefault(),s.hide())});'
+    b'let c=AP({window:TP(s),app:{onceBeforeQuit:d=>he.app.once("before-quit",d)}})'
+)
+CURRENT_SECOND_INSTANCE_FIND = (
+    b's=(c,l)=>{let d=Mh(r,l);if(d.length===0){t.focus();return}'
+    b'for(let u of d)o.handleCandidate(u,"second-instance")}'
+)
+CURRENT_SECOND_INSTANCE_REPLACE = (
+    b's=(c,l)=>{let d=Mh(r,l);t.focus();if(d.length!==0)'
+    b'for(let u of d)o.handleCandidate(u,"second-instance")};;;;;;;;'
+)
+CURRENT_MENU_HIDE_FIND = (
+    b'i=new is.BrowserWindow({...a.windowOptions,title:is.app.getName(),'
+    b'icon:pP({platform:process.platform,isPackaged:is.app.isPackaged,'
+    b'resourcesPath:process.resourcesPath,devIconPath:t}),backgroundColor:e,'
+    b'...rP({isMac:o,isWindows:process.platform==="win32",backgroundColor:e}),'
+    b'webPreferences:{contextIsolation:!0,nodeIntegration:!1,preload:'
+    b'vp.default.join(Sy,Tp({isPackaged:is.app.isPackaged,devCapability:r})),'
+    b'sandbox:!0,webviewTag:!0}})'
+)
+CURRENT_MENU_HIDE_REPLACE = (
+    CURRENT_MENU_HIDE_FIND.replace(
+        b"{...a.windowOptions,",
+        b"{...a.windowOptions,autoHideMenuBar:!0,",
+        1,
+    )
+)
+CURRENT_SIGTERM_FIND = (
+    b'var su=!he.app.isPackaged||he.app.requestSingleInstanceLock();'
+    b'su||he.app.quit();'
+)
+CURRENT_SIGTERM_REPLACE = (
+    b'var su=!he.app.isPackaged||he.app.requestSingleInstanceLock();'
+    b'su||he.app.quit();process.on("SIGTERM",()=>{he.app.quit()});'
+)
+CURRENT_RELAUNCH_FIND = (
+    b"hardwareAccelerationEnabledAtLaunch:kjt,relaunchDesktop:()=>{let B="
+    b"ne.environment.restartExitCode;if(B!=null){zZ(B);return}"
+    b"me.app.relaunch(),me.app.quit()},getMachineId:()=>it()"
+)
+CURRENT_RELAUNCH_REPLACE = CURRENT_RELAUNCH_FIND.replace(
+    b"me.app.relaunch(),me.app.quit()",
+    b"me.app.relaunch(),me.app.exit()",
+    1,
+)
 PATCHES = (
     (NATIVE_FRAME_FIND, NATIVE_FRAME_REPLACE),
     (IN_CONTENT_CONTROLS_FIND, IN_CONTENT_CONTROLS_REPLACE),
@@ -178,7 +244,7 @@ class StructuralPatch:
 
 
 class NativePatchRule:
-    """An exact legacy patch with an optional structural fallback."""
+    """An exact pinned patch with an optional manual structural fallback."""
 
     __slots__ = (
         "name",
@@ -186,7 +252,10 @@ class NativePatchRule:
         "replace",
         "structural",
         "extension",
-        "path_prefix",
+        "member_path",
+        "structural_path",
+        "exact_paths",
+        "exact_pairs",
     )
 
     def __init__(
@@ -196,17 +265,24 @@ class NativePatchRule:
         replace: bytes,
         structural: StructuralPatch | None = None,
         extension: bool = False,
-        path_prefix: str | None = None,
+        member_path: str | None = None,
+        structural_path: str | None = None,
+        exact_paths: tuple[str, ...] = (),
+        exact_pairs: tuple[tuple[bytes, bytes], ...] = (),
     ) -> None:
         self.name = name
         self.find = find
         self.replace = replace
         self.structural = structural
         self.extension = extension
-        self.path_prefix = path_prefix
+        self.member_path = member_path
+        self.structural_path = structural_path
+        self.exact_paths = exact_paths
+        self.exact_pairs = ((find, replace),) + exact_pairs
 
 
-PatchCandidate = tuple[str, int, int, re.Match[bytes] | None]
+PatchCandidate = tuple[str, int, int, re.Match[bytes] | None, bytes | None]
+AppliedPatch = tuple[NativePatchRule, str, bytes, bool]
 
 
 _CONTROLS_STRUCTURAL = StructuralPatch(
@@ -407,28 +483,34 @@ NATIVE_PATCH_RULES = (
         "native Linux frame",
         NATIVE_FRAME_FIND,
         NATIVE_FRAME_REPLACE,
-        path_prefix="dist/electron-main/main-core.cjs",
+        member_path="dist/electron-main/main-core.cjs",
     ),
     NativePatchRule(
         "Linux in-content controls",
-        IN_CONTENT_CONTROLS_FIND,
-        IN_CONTENT_CONTROLS_REPLACE,
+        CURRENT_CONTROLS_FIND,
+        CURRENT_CONTROLS_REPLACE,
         _CONTROLS_STRUCTURAL,
-        path_prefix="dist/renderer/assets/",
+        exact_paths=(
+            "dist/renderer/assets/index-B7CuLxVI.js",
+        ),
+        exact_pairs=(),
+        structural_path="dist/renderer/assets/index-B7CuLxVI.js",
     ),
     NativePatchRule(
         "second-instance reveal",
         SECOND_INSTANCE_REVEAL_FIND,
         SECOND_INSTANCE_REVEAL_REPLACE,
         _SECOND_INSTANCE_STRUCTURAL,
-        path_prefix="dist/electron-main/main-core.cjs",
+        member_path="dist/electron-main/main-core.cjs",
+        exact_pairs=((CURRENT_SECOND_INSTANCE_FIND, CURRENT_SECOND_INSTANCE_REPLACE),),
     ),
     NativePatchRule(
         "hardware-acceleration relaunch",
         RELAUNCH_QUIT_FIND,
         RELAUNCH_QUIT_REPLACE,
         _RELAUNCH_STRUCTURAL,
-        path_prefix="dist/electron-main/main-app.cjs",
+        member_path="dist/electron-main/main-app.cjs",
+        exact_pairs=((CURRENT_RELAUNCH_FIND, CURRENT_RELAUNCH_REPLACE),),
     ),
     NativePatchRule(
         "close-to-hide lifecycle",
@@ -436,7 +518,8 @@ NATIVE_PATCH_RULES = (
         CLOSE_INTERCEPT_REPLACE,
         _CLOSE_STRUCTURAL,
         extension=True,
-        path_prefix="dist/electron-main/main-core.cjs",
+        member_path="dist/electron-main/main-core.cjs",
+        exact_pairs=((CURRENT_CLOSE_FIND, CURRENT_CLOSE_REPLACE),),
     ),
     NativePatchRule(
         "window-all-closed quit arming",
@@ -444,7 +527,7 @@ NATIVE_PATCH_RULES = (
         QUIT_ARM_REPLACE,
         _QUIT_ARM_STRUCTURAL,
         extension=True,
-        path_prefix="dist/electron-main/main-core.cjs",
+        member_path="dist/electron-main/main-core.cjs",
     ),
     NativePatchRule(
         "BrowserWindow menu hiding",
@@ -452,7 +535,8 @@ NATIVE_PATCH_RULES = (
         MENU_HIDE_REPLACE,
         _MENU_HIDE_STRUCTURAL,
         extension=True,
-        path_prefix="dist/electron-main/main-core.cjs",
+        member_path="dist/electron-main/main-core.cjs",
+        exact_pairs=((CURRENT_MENU_HIDE_FIND, CURRENT_MENU_HIDE_REPLACE),),
     ),
     NativePatchRule(
         "single-instance graceful SIGTERM bridge",
@@ -460,7 +544,8 @@ NATIVE_PATCH_RULES = (
         SIGTERM_QUIT_BRIDGE_REPLACE,
         _SIGTERM_STRUCTURAL,
         extension=True,
-        path_prefix="dist/electron-main/main-core.cjs",
+        member_path="dist/electron-main/main-core.cjs",
+        exact_pairs=((CURRENT_SIGTERM_FIND, CURRENT_SIGTERM_REPLACE),),
     ),
 )
 
@@ -572,32 +657,48 @@ def _semantic_candidates(
     return semantic
 
 
+def _member_matches(rule: NativePatchRule, path: str) -> bool:
+    if rule.exact_paths:
+        return path in rule.exact_paths
+    if rule.member_path is None:
+        return True
+    return path == rule.member_path
+
+
+def _structural_member_matches(rule: NativePatchRule, path: str) -> bool:
+    if rule.structural_path is not None:
+        return path == rule.structural_path
+    return _member_matches(rule, path)
+
+
 def _apply_native_frame_rules(
     blob: bytes,
-) -> tuple[bytes, list[tuple[NativePatchRule, str, bytes]]]:
-    """Apply legacy byte rules or their uniquely identified structural fallbacks."""
+    *,
+    allow_structural_fallback: bool = False,
+) -> tuple[bytes, list[AppliedPatch]]:
+    """Apply exact pinned rules, or an explicitly enabled structural fallback."""
     header, json_start, json_len, data_offset = read_asar(blob)
     contents = {
         path: _member_bytes(blob, meta, data_offset)
         for path, meta in _walk_files(header)
         if not meta.get("unpacked")
     }
-    applied: list[tuple[NativePatchRule, str, bytes]] = []
+    applied: list[AppliedPatch] = []
 
     for rule in NATIVE_PATCH_RULES:
         exact_candidates: list[PatchCandidate] = [
-            (path, match.start(), match.end(), None)
+            (path, match.start(), match.end(), None, replacement)
             for path, content in contents.items()
-            if rule.find in content
-            and (rule.path_prefix is None or path.startswith(rule.path_prefix))
-            for match in re.finditer(re.escape(rule.find), content)
+            if _member_matches(rule, path)
+            for find, replacement in rule.exact_pairs
+            for match in re.finditer(re.escape(find), content)
         ]
         structural_candidates: list[PatchCandidate] = []
         if rule.structural is not None:
             structural_candidates = [
-                (path, match.start(), match.end(), match)
+                (path, match.start(), match.end(), match, None)
                 for path, content in contents.items()
-                if rule.path_prefix is None or path.startswith(rule.path_prefix)
+                if _structural_member_matches(rule, path)
                 for match in rule.structural.pattern.finditer(content)
             ]
 
@@ -605,16 +706,24 @@ def _apply_native_frame_rules(
         if len(candidates) != 1:
             locations = [
                 (path, start, end, "exact" if match is None else "structural")
-                for path, start, end, match in candidates
+                for path, start, end, match, _replacement in candidates
             ]
             raise TransformError(
                 "expected exactly one semantic ASAR occurrence of %s, found %s"
                 % (rule.name, locations)
             )
 
-        path, start, end, structural_match = candidates[0]
+        path, start, end, structural_match, exact_replacement = candidates[0]
+        if structural_match is not None and not allow_structural_fallback:
+            raise TransformError(
+                "structural fallback disabled for %s at %s; exact pinned anchors are required; "
+                "use --allow-structural-fallback only for manual diagnostics"
+                % (rule.name, path)
+            )
         if structural_match is None:
-            replacement = rule.replace
+            replacement = exact_replacement
+            if replacement is None:
+                raise TransformError("exact candidate without a replacement")
             updated = contents[path][:start] + replacement + contents[path][end:]
             if rule.extension:
                 if replacement not in updated:
@@ -647,11 +756,11 @@ def _apply_native_frame_rules(
                 )
 
         contents[path] = updated
-        applied.append((rule, path, replacement))
+        applied.append((rule, path, replacement, structural_match is not None))
 
     result = _rebuild_asar(blob, header, json_start, json_len, data_offset, contents)
     rebuilt_contents = _packed_contents(result)
-    for rule, path, replacement in applied:
+    for rule, path, replacement, _used_structural_fallback in applied:
         data = rebuilt_contents.get(path)
         if data is None or replacement not in data:
             raise TransformError("expected replacement is missing: %s" % rule.name)
@@ -941,14 +1050,17 @@ def apply_transforms(
     )
 
 
-def apply_native_frame_patches(blob: bytes) -> bytes:
+def apply_native_frame_patches(
+    blob: bytes, *, allow_structural_fallback: bool = False
+) -> bytes:
     """Patch packed members and rebuild the archive fail-closed.
 
-    Legacy releases use the byte-exact rules above. Newer minified bundles may
-    rename local identifiers, so each affected rule also has a narrowly scoped
-    structural fallback. Both paths require exactly one match.
+    The currently pinned payload uses byte-exact anchors. Structural rules are
+    retained only for an explicit manual diagnostic invocation.
     """
-    result, _applied = _apply_native_frame_rules(blob)
+    result, _applied = _apply_native_frame_rules(
+        blob, allow_structural_fallback=allow_structural_fallback
+    )
 
     if WINDOWS_WCO_MARK not in result or MAC_FRAME_MARK not in result:
         raise TransformError("refusing to drop macOS/Windows window chrome")
@@ -1011,10 +1123,32 @@ def write_asar(
     return header_size_pickle + header_pickle + bytes(payload)
 
 
-def patch_asar_file(path: str) -> None:
+def patch_asar_file(
+    path: str, *, allow_structural_fallback: bool = False
+) -> list[str]:
+    """Patch one ASAR and require explicit approval for structural fallback."""
     with open(path, "rb") as handle:
         original = handle.read()
-    patched = apply_native_frame_patches(original)
+    patched, applied = _apply_native_frame_rules(
+        original, allow_structural_fallback=allow_structural_fallback
+    )
+    if WINDOWS_WCO_MARK not in patched or MAC_FRAME_MARK not in patched:
+        raise TransformError("refusing to drop macOS/Windows window chrome")
+    fallbacks = [
+        "%s in %s" % (rule.name, member_path)
+        for rule, member_path, _replacement, used_structural_fallback in applied
+        if used_structural_fallback
+    ]
+    if fallbacks and not allow_structural_fallback:
+        raise TransformError(
+            "structural fallback requires explicit "
+            "--allow-structural-fallback: %s" % ", ".join(fallbacks)
+        )
+    _write_patched_asar(path, patched)
+    return fallbacks
+
+
+def _write_patched_asar(path: str, patched: bytes) -> None:
     fd, tmp_name = None, path + ".tmp"
     try:
         fd = os.open(tmp_name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
@@ -1033,14 +1167,24 @@ def patch_asar_file(path: str) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
+    allow_structural_fallback = False
+    if len(args) == 2 and args[0] == "--allow-structural-fallback":
+        allow_structural_fallback = True
+        args = args[1:]
     if len(args) != 1 or not args[0]:
         sys.stderr.write(
-            "usage: patch_electron_native_frame.py /path/to/app.asar\n"
+            "usage: patch_electron_native_frame.py [--allow-structural-fallback] /path/to/app.asar\n"
         )
         return 1
     path = args[0]
     try:
-        patch_asar_file(path)
+        fallbacks = patch_asar_file(
+            path, allow_structural_fallback=allow_structural_fallback
+        )
+        for fallback in fallbacks:
+            sys.stderr.write(
+                "patch_electron_native_frame: structural fallback: %s\n" % fallback
+            )
     except (OSError, TransformError, json.JSONDecodeError, UnicodeDecodeError) as exc:
         sys.stderr.write("patch_electron_native_frame: %s\n" % exc)
         return 1

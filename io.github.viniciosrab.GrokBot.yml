@@ -88,6 +88,8 @@ modules:
         printf '#!/bin/sh\nexport CHROME_DESKTOP=io.github.viniciosrab.GrokBot.desktop\ncase "${XDG_DATA_HOME:-}" in\n  /*) SAND_DATA_ROOT="${XDG_DATA_HOME}/grok-bot" ;;\n  *) SAND_DATA_ROOT="${HOME}/.local/share/grok-bot" ;;\nesac\nexport SAND_DATA_ROOT\nmkdir -p "${SAND_DATA_ROOT}"\nexec /app/bin/zypak-wrapper "/app/grok-bot/%s" --password-store=basic "$@"\n' "${ELECTRON_ENTRY}" > /app/bin/grok-bot-electron
         chmod 755 /app/bin/grok-bot-electron
         test -f /app/grok-bot/resources/app.asar || { echo "missing packed Electron app.asar" >&2; exit 1; }
+        # The pinned upstream shape must match the exact anchors. Structural
+        # fallback remains a manual diagnostic-only CLI option.
         python3 patch_electron_native_frame.py /app/grok-bot/resources/app.asar
         cp -a grok-bot-unpacked/usr/share/icons/hicolor/. /app/share/icons/hicolor/
         # Preserve the original rounded vendor Electron resource before any

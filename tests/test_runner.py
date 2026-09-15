@@ -108,6 +108,12 @@ COMPANION_TESTS_DIR = os.path.join(REPO_ROOT, "companion", "tests")
 COMPANION_LIFECYCLE_SRC = os.path.join(
     COMPANION_TESTS_DIR, "test_lifecycle_posix.cpp"
 )
+COMPANION_LIFECYCLE_HELPERS_SRC = os.path.join(
+    REPO_ROOT, "companion", "src", "lifecycle_helpers.cpp"
+)
+COMPANION_DEEP_LINK_TEST_SRC = os.path.join(
+    COMPANION_TESTS_DIR, "test_deep_link_exit.cpp"
+)
 COMPANION_TESTS_CMAKE = os.path.join(COMPANION_TESTS_DIR, "CMakeLists.txt")
 WATCHERLESS_SCRIPT = os.path.join(COMPANION_TESTS_DIR, "check_watcherless.sh")
 TOP_CMAKE = os.path.join(REPO_ROOT, "CMakeLists.txt")
@@ -544,10 +550,9 @@ def check_native_kde_frame_transform(manifest_text):
     """
     if "path: tools/patch_electron_native_frame.py" not in manifest_text:
         return False
-    if (
-        "python3 patch_electron_native_frame.py /app/grok-bot/resources/app.asar"
-        not in manifest_text
-    ):
+    if "python3 patch_electron_native_frame.py /app/grok-bot/resources/app.asar" not in manifest_text:
+        return False
+    if "--allow-structural-fallback" in manifest_text:
         return False
     if "Electron2.BaseApp" in manifest_text:
         return False
@@ -1086,7 +1091,10 @@ class ProtocolHandoffContractTests(unittest.TestCase):
             companion_src.index("grok-bot-companion.lock"),
         )
         self.assertIn("forwardProtocolUrls", companion_src)
-        self.assertIn("return 0", companion_src)
+        self.assertIn(
+            "return !protocolUrls.isEmpty() && !forwarded ? 1 : 0;",
+            companion_src,
+        )
 
     def test_cold_start_does_not_pass_protocol_urls_to_initial_startchild(self):
         companion_src = read_repo_text(COMPANION_SRC)
@@ -1123,6 +1131,7 @@ class ProtocolHandoffContractTests(unittest.TestCase):
 
     def test_protocol_forwarding_is_bounded_non_blocking_and_does_not_log_urls(self):
         companion_src = read_repo_text(COMPANION_SRC)
+        lifecycle_helpers = read_repo_text(COMPANION_LIFECYCLE_HELPERS_SRC)
         poll = int(re.search(r"kColdProtocolSocketPollMs = (\d+)", companion_src).group(1))
         timeout = int(
             re.search(r"kColdProtocolReadyTimeoutMs = (\d+)", companion_src).group(1)
@@ -1132,7 +1141,7 @@ class ProtocolHandoffContractTests(unittest.TestCase):
         self.assertLessEqual(timeout, 30000)
         self.assertIn("QTimer::singleShot", companion_src)
         self.assertIn("hasExpired", companion_src)
-        self.assertIn("AF_UNIX", companion_src)
+        self.assertIn("AF_UNIX", lifecycle_helpers)
         self.assertNotIn("kMaxColdProtocolDeliveryAttempts", companion_src)
         self.assertNotIn("while (true)", companion_src)
         self.assertEqual(companion_src.count("waitForStarted"), 1)
@@ -1157,15 +1166,19 @@ class ProtocolHandoffContractTests(unittest.TestCase):
         companion_src = read_repo_text(COMPANION_SRC)
         lock_fail = companion_src.index("!instanceLock.tryLock()")
         forward = companion_src.index("forwardProtocolUrls(resolveElectronCommand(app), protocolUrls)")
-        ret = companion_src.index("return 0;", forward)
+        ret = companion_src.index(
+            "return !protocolUrls.isEmpty() && !forwarded ? 1 : 0;",
+            forward,
+        )
         self.assertLess(lock_fail, forward)
         self.assertLess(forward, ret)
 
     def test_callback_schemes_remain_grokbot_and_sand(self):
         companion_src = read_repo_text(COMPANION_SRC)
+        lifecycle_helpers = read_repo_text(COMPANION_LIFECYCLE_HELPERS_SRC)
         desktop_text = read_repo_text(DESKTOP_PATH)
-        self.assertIn('QLatin1String("grokbot:")', companion_src)
-        self.assertIn('QLatin1String("sand:")', companion_src)
+        self.assertIn('QLatin1String("grokbot:")', lifecycle_helpers)
+        self.assertIn('QLatin1String("sand:")', lifecycle_helpers)
         self.assertIn("MimeType=x-scheme-handler/grokbot;x-scheme-handler/sand;", desktop_text)
 
     def test_tray_icon_contracts_remain_untouched(self):
@@ -1275,6 +1288,8 @@ class UntrackedSingletonContractTests(unittest.TestCase):
             "companion/tests/test_lifecycle_posix.cpp must exist",
         )
         src = read_repo_text(COMPANION_LIFECYCLE_SRC)
+        helpers = read_repo_text(COMPANION_LIFECYCLE_HELPERS_SRC)
+        self.assertTrue(os.path.isfile(COMPANION_DEEP_LINK_TEST_SRC))
         for required in (
             "AF_UNIX",
             "SO_PEERCRED",
@@ -1283,7 +1298,7 @@ class UntrackedSingletonContractTests(unittest.TestCase):
             "::poll(",
             "mkdtemp",
         ):
-            self.assertIn(required, src)
+            self.assertIn(required, src + helpers)
         for forbidden in ("Fake", "Mock", "Adapter", "Stub"):
             self.assertNotIn(forbidden, src)
 
@@ -1305,6 +1320,8 @@ class UntrackedSingletonContractTests(unittest.TestCase):
             "cold_start_forward",
         ):
             self.assertIn(case, tests_cmake)
+        self.assertIn("companion_deep_link_exit", tests_cmake)
+        self.assertIn("test_deep_link_exit.cpp", tests_cmake)
         self.assertIn("TIMEOUT", tests_cmake)
         watcherless = read_repo_text(WATCHERLESS_SCRIPT)
         self.assertIn("StatusNotifierWatcher", watcherless)
@@ -1330,6 +1347,7 @@ class UntrackedSingletonContractTests(unittest.TestCase):
 
     def test_production_lifecycle_paths_remain_for_compiled_probes(self):
         companion_src = read_repo_text(COMPANION_SRC)
+        lifecycle_helpers = read_repo_text(COMPANION_LIFECYCLE_HELPERS_SRC)
         for required in (
             "electronSingleInstanceReady",
             "linuxPeerPid",
@@ -1340,6 +1358,8 @@ class UntrackedSingletonContractTests(unittest.TestCase):
             "forwardProtocolUrls",
         ):
             self.assertIn(required, companion_src)
+        for required in ("AF_UNIX", "SO_PEERCRED", "groupExited", "waitForProcessGroupExit"):
+            self.assertIn(required, lifecycle_helpers)
 
 
 class ZypakSubmoduleContractTests(unittest.TestCase):
