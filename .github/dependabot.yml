@@ -1,0 +1,19 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 3
+    allow:
+      - dependency-name: "actions/checkout"
+      - dependency-name: "actions/create-github-app-token"
+      - dependency-name: "actions/upload-artifact"
+      - dependency-name: "actions/download-artifact"
+      - dependency-name: "actions/upload-pages-artifact"
+      - dependency-name: "actions/deploy-pages"
+    # Major upgrades require an intentional allowlist and contract update.
+    ignore:
+      - dependency-name: "*"
+        update-types:
+          - "version-update:semver-major"

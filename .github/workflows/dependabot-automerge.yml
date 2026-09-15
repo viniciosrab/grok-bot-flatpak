@@ -1,0 +1,466 @@
+# Dependabot GitHub Actions auto-merge gate.
+#
+# This workflow runs from the trusted base through pull_request_target. It
+# never checks out, imports, or executes pull request bytes. API responses are
+# treated as data and the validator is fetched from the captured base commit.
+# Configure main remotely to require the normal validation checks and this
+# workflow's `automerge` check; auto-merge then remains gated by those checks.
+# Also enable "Allow GitHub Actions to create and approve pull requests".
+
+name: dependabot-action-automerge
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: dependabot-action-automerge-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  EXPECTED_REPOSITORY: viniciosrab/grok-bot-flatpak
+
+jobs:
+  automerge:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Validate the event and capture the exact PR refs
+        id: inspect
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_REPOSITORY: ${{ github.event.repository.full_name }}
+          EVENT_AUTHOR: ${{ github.event.pull_request.user.login }}
+          EVENT_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          EVENT_SENDER: ${{ github.event.sender.login }}
+          EVENT_ACTION: ${{ github.event.action }}
+          EVENT_PR_NUMBER: ${{ github.event.number }}
+          EXPECTED_REPOSITORY: ${{ env.EXPECTED_REPOSITORY }}
+        run: |
+          set -euo pipefail
+          case "${EVENT_ACTION}" in
+            opened|reopened|synchronize|ready_for_review) ;;
+            *)
+              echo "unexpected pull_request_target action; refusing to inspect" >&2
+              exit 1
+              ;;
+          esac
+          PR_NUMBER="${EVENT_PR_NUMBER}"
+          case "${PR_NUMBER}" in
+            ""|*[!0-9]*)
+              echo "pull request number is malformed; refusing" >&2
+              exit 1
+              ;;
+          esac
+          if [ "${PR_NUMBER}" -le 0 ]; then
+            echo "pull request number is not positive; refusing" >&2
+            exit 1
+          fi
+          # Foreign repositories are successful no-ops; never use their PR
+          # number as an API target.
+          if [ "${EVENT_REPOSITORY}" != "${EXPECTED_REPOSITORY}" ]; then
+            echo "event is not the exact Dependabot/main target; no-op"
+            echo "eligible=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          # A non-Dependabot synchronize can leave an older auto-merge
+          # request armed. Verify the event and current API object before
+          # disabling it, then bind the cancellation to that API head OID.
+          if [ "${EVENT_ACTION}" = "synchronize" ] \
+            && [ "${EVENT_SENDER}" != "dependabot[bot]" ]; then
+            if [ "${EVENT_AUTHOR}" != "dependabot[bot]" ] \
+              || [ "${EVENT_BASE_REF}" != "main" ]; then
+              echo "foreign synchronize event is not the exact target; no-op"
+              echo "eligible=false" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            PR_JSON="${RUNNER_TEMP}/dependabot-pr-cancel.json"
+            gh api "repos/${EXPECTED_REPOSITORY}/pulls/${PR_NUMBER}" > "${PR_JSON}"
+            CANCEL_HEAD_OID_FILE="${RUNNER_TEMP}/dependabot-cancel-head-oid"
+            python3 - "${PR_JSON}" "${CANCEL_HEAD_OID_FILE}" <<'PYEOF'
+          import json
+          import os
+          import re
+          import sys
+
+          COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+          try:
+              with open(sys.argv[1], encoding="utf-8") as handle:
+                  pr = json.load(handle)
+          except (OSError, ValueError) as error:
+              raise SystemExit("invalid GitHub PR API JSON: %s" % error)
+          if not isinstance(pr, dict):
+              raise SystemExit("pull request response is not an object")
+          if pr.get("number") != int(os.environ["EVENT_PR_NUMBER"]):
+              raise SystemExit("API pull request number differs from the event")
+          if pr.get("state") != "open":
+              raise SystemExit("pull request is not open; refusing cancellation")
+          user = pr.get("user")
+          base = pr.get("base")
+          head = pr.get("head")
+          if not isinstance(user, dict) or user.get("login") != "dependabot[bot]":
+              raise SystemExit("pull request author is not exactly dependabot[bot]")
+          if not isinstance(base, dict) or not isinstance(head, dict):
+              raise SystemExit("pull request base/head metadata is malformed")
+          expected_repo = os.environ["EXPECTED_REPOSITORY"]
+          base_repo = base.get("repo")
+          head_repo = head.get("repo")
+          if (
+              base.get("ref") != "main"
+              or not isinstance(base_repo, dict)
+              or base_repo.get("full_name") != expected_repo
+              or not isinstance(head_repo, dict)
+              or head_repo.get("full_name") != expected_repo
+          ):
+              raise SystemExit("pull request is not the exact Dependabot/main target")
+          head_oid = head.get("sha")
+          if not isinstance(head_oid, str) or not COMMIT_RE.fullmatch(head_oid):
+              raise SystemExit("pull request head OID is not a full lowercase SHA")
+          with open(sys.argv[2], "w", encoding="utf-8") as handle:
+              handle.write(head_oid + "\n")
+          PYEOF
+            CANCEL_HEAD_OID="$(cat "${CANCEL_HEAD_OID_FILE}")"
+            case "${CANCEL_HEAD_OID}" in
+              ""|*[!0-9a-f]*) echo "cancellation head OID is malformed; refusing" >&2; exit 1 ;;
+            esac
+            if [ "${#CANCEL_HEAD_OID}" -ne 40 ]; then
+              echo "cancellation head OID is not a full SHA; refusing" >&2
+              exit 1
+            fi
+            if ! gh pr merge --repo "${EXPECTED_REPOSITORY}" --disable-auto \
+              --match-head-commit "${CANCEL_HEAD_OID}" "${PR_NUMBER}"; then
+              echo "failed to disable stale auto-merge; failing closed" >&2
+              exit 1
+            fi
+            echo "disabled stale auto-merge for Dependabot PR #${PR_NUMBER} at ${CANCEL_HEAD_OID}"
+            echo "eligible=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          # Other foreign events remain successful no-ops. The sender gate
+          # above is deliberately special only for synchronize cancellation.
+          if [ "${EVENT_AUTHOR}" != "dependabot[bot]" ] \
+            || [ "${EVENT_BASE_REF}" != "main" ] \
+            || [ "${EVENT_SENDER}" != "dependabot[bot]" ]; then
+            echo "event is not the exact Dependabot/main target; no-op"
+            echo "eligible=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          PR_JSON="${RUNNER_TEMP}/dependabot-pr.json"
+          gh api "repos/${EXPECTED_REPOSITORY}/pulls/${PR_NUMBER}" > "${PR_JSON}"
+          BASE_OID_FILE="${RUNNER_TEMP}/dependabot-base-oid"
+          HEAD_OID_FILE="${RUNNER_TEMP}/dependabot-head-oid"
+          HEAD_REF_FILE="${RUNNER_TEMP}/dependabot-head-ref"
+          python3 - "${PR_JSON}" "${BASE_OID_FILE}" "${HEAD_OID_FILE}" "${HEAD_REF_FILE}" <<'PYEOF'
+          import json
+          import os
+          import re
+          import sys
+
+          ACTIONS = (
+              "actions/checkout",
+              "actions/create-github-app-token",
+              "actions/upload-artifact",
+              "actions/download-artifact",
+              "actions/upload-pages-artifact",
+              "actions/deploy-pages",
+          )
+          COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+          HEAD_RE = re.compile(
+              r"^dependabot/github_actions/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+-[0-9][A-Za-z0-9_.-]*$"
+          )
+
+          try:
+              with open(sys.argv[1], encoding="utf-8") as handle:
+                  pr = json.load(handle)
+          except (OSError, ValueError) as error:
+              raise SystemExit("invalid GitHub PR API JSON: %s" % error)
+          if not isinstance(pr, dict):
+              raise SystemExit("pull request response is not an object")
+          number = os.environ["EVENT_PR_NUMBER"]
+          if pr.get("number") != int(number):
+              raise SystemExit("API pull request number differs from the event")
+          if pr.get("state") != "open":
+              raise SystemExit("pull request is not open; refusing auto-merge")
+          if pr.get("user", {}).get("login") != "dependabot[bot]":
+              raise SystemExit("pull request author is not exactly dependabot[bot]")
+          base = pr.get("base")
+          head = pr.get("head")
+          if not isinstance(base, dict) or not isinstance(head, dict):
+              raise SystemExit("pull request base/head metadata is malformed")
+          expected_repo = os.environ["EXPECTED_REPOSITORY"]
+          if base.get("ref") != "main" or base.get("repo", {}).get("full_name") != expected_repo:
+              raise SystemExit("pull request base is not the exact main repository")
+          if head.get("repo", {}).get("full_name") != expected_repo:
+              raise SystemExit("pull request head repository is not exact")
+          head_ref = head.get("ref")
+          if not isinstance(head_ref, str) or not HEAD_RE.fullmatch(head_ref):
+              raise SystemExit("pull request head is not an expected Dependabot branch")
+          action_ref = head_ref[len("dependabot/github_actions/"):]
+          if not any(
+              action_ref == action or action_ref.startswith(action + "-")
+              for action in ACTIONS
+          ):
+              raise SystemExit("pull request head does not identify an allowlisted Action")
+          base_oid = base.get("sha")
+          head_oid = head.get("sha")
+          if not isinstance(base_oid, str) or not COMMIT_RE.fullmatch(base_oid):
+              raise SystemExit("pull request base OID is not a full lowercase SHA")
+          if not isinstance(head_oid, str) or not COMMIT_RE.fullmatch(head_oid):
+              raise SystemExit("pull request head OID is not a full lowercase SHA")
+          for path, value in zip(sys.argv[2:], (base_oid, head_oid, head_ref)):
+              with open(path, "w", encoding="utf-8") as handle:
+                  handle.write(value + "\n")
+          if pr.get("draft") is True:
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+                  handle.write("eligible=false\n")
+              print("draft Dependabot PR; no auto-merge mutation")
+              raise SystemExit(0)
+          if pr.get("draft") is not False:
+              raise SystemExit("draft state is missing or malformed")
+          PYEOF
+          BASE_OID="$(cat "${BASE_OID_FILE}")"
+          HEAD_OID="$(cat "${HEAD_OID_FILE}")"
+          HEAD_REF="$(cat "${HEAD_REF_FILE}")"
+          case "${BASE_OID}" in
+            ""|*[!0-9a-f]*) echo "captured base OID is malformed; refusing" >&2; exit 1 ;;
+          esac
+          case "${HEAD_OID}" in
+            ""|*[!0-9a-f]*) echo "captured head OID is malformed; refusing" >&2; exit 1 ;;
+          esac
+          if [ "${#BASE_OID}" -ne 40 ] || [ "${#HEAD_OID}" -ne 40 ]; then
+            echo "captured OIDs are not full SHAs; refusing" >&2
+            exit 1
+          fi
+          COMPARE_JSON="${RUNNER_TEMP}/dependabot-compare.json"
+          gh api "repos/${EXPECTED_REPOSITORY}/compare/${BASE_OID}...${HEAD_OID}" > "${COMPARE_JSON}"
+          HELPER_API_JSON="${RUNNER_TEMP}/dependabot-validator-api.json"
+          HELPER_PATH="${RUNNER_TEMP}/validate_dependabot_actions.py"
+          gh api "repos/${EXPECTED_REPOSITORY}/contents/tools/validate_dependabot_actions.py?ref=${BASE_OID}" > "${HELPER_API_JSON}"
+          python3 - "${HELPER_API_JSON}" "${HELPER_PATH}" <<'PYEOF'
+          import base64
+          import hashlib
+          import json
+          import sys
+
+          try:
+              with open(sys.argv[1], encoding="utf-8") as handle:
+                  response = json.load(handle)
+          except (OSError, ValueError) as error:
+              raise SystemExit("invalid validator API JSON: %s" % error)
+          if (
+              not isinstance(response, dict)
+              or response.get("path") != "tools/validate_dependabot_actions.py"
+              or response.get("type") != "file"
+              or response.get("encoding") != "base64"
+              or not isinstance(response.get("content"), str)
+          ):
+              raise SystemExit("validator response is not the exact base file")
+          encoded = "".join(response["content"].split())
+          try:
+              source = base64.b64decode(encoded, validate=True)
+          except (ValueError, base64.binascii.Error) as error:
+              raise SystemExit("validator base64 is malformed: %s" % error)
+          blob_sha = hashlib.sha1(
+              b"blob " + str(len(source)).encode("ascii") + b"\0" + source
+          ).hexdigest()
+          if response.get("sha") != blob_sha:
+              raise SystemExit("validator blob SHA does not match its bytes")
+          with open(sys.argv[2], "wb") as handle:
+              handle.write(source)
+          PYEOF
+          chmod 500 "${HELPER_PATH}"
+          export EVENT_PR_NUMBER="${PR_NUMBER}"
+          export EXPECTED_BASE_OID="${BASE_OID}"
+          export EXPECTED_HEAD_OID="${HEAD_OID}"
+          export EXPECTED_HEAD_REF="${HEAD_REF}"
+          python3 "${HELPER_PATH}" "${PR_JSON}" "${COMPARE_JSON}"
+
+      - name: Revalidate the exact head, approve, and enable auto-merge
+        if: ${{ steps.inspect.outputs.eligible == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_REPOSITORY: ${{ env.EXPECTED_REPOSITORY }}
+          PR_NUMBER: ${{ steps.inspect.outputs.pr_number }}
+          EXPECTED_BASE_OID: ${{ steps.inspect.outputs.base_oid }}
+          EXPECTED_HEAD_OID: ${{ steps.inspect.outputs.head_oid }}
+          EXPECTED_HEAD_REF: ${{ steps.inspect.outputs.head_ref }}
+          EVENT_PR_NUMBER: ${{ steps.inspect.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          require_exact_validation_output() {
+            local output_file="$1"
+            local expected_pr="$2"
+            local expected_base="$3"
+            local expected_head="$4"
+            local expected_ref="$5"
+            python3 - "${output_file}" "${expected_pr}" "${expected_base}" "${expected_head}" "${expected_ref}" <<'PYEOF'
+          import sys
+
+          try:
+              with open(sys.argv[1], encoding="utf-8") as handle:
+                  lines = handle.read().splitlines()
+          except (OSError, UnicodeError) as error:
+              raise SystemExit("validator output is unreadable: %s" % error)
+          expected_true = [
+              "eligible=true",
+              "pr_number=" + sys.argv[2],
+              "base_oid=" + sys.argv[3],
+              "head_oid=" + sys.argv[4],
+              "head_ref=" + sys.argv[5],
+          ]
+          expected_false = list(expected_true)
+          expected_false[0] = "eligible=false"
+          if lines == expected_false:
+              raise SystemExit(3)
+          if lines != expected_true:
+              raise SystemExit("validator output is missing, duplicated, or malformed")
+          PYEOF
+          }
+          case "${PR_NUMBER}" in
+            ""|*[!0-9]*) echo "PR number is malformed; refusing mutation" >&2; exit 1 ;;
+          esac
+          case "${EXPECTED_BASE_OID}" in
+            ""|*[!0-9a-f]*) echo "expected base OID is malformed; refusing mutation" >&2; exit 1 ;;
+          esac
+          case "${EXPECTED_HEAD_OID}" in
+            ""|*[!0-9a-f]*) echo "expected head OID is malformed; refusing mutation" >&2; exit 1 ;;
+          esac
+          if [ "${#EXPECTED_BASE_OID}" -ne 40 ] || [ "${#EXPECTED_HEAD_OID}" -ne 40 ]; then
+            echo "expected OIDs are not full SHAs; refusing mutation" >&2
+            exit 1
+          fi
+          VALIDATOR_PATH="${RUNNER_TEMP}/validate_dependabot_actions.py"
+          test -x "${VALIDATOR_PATH}" || { echo "trusted base validator is missing" >&2; exit 1; }
+          REVALIDATED_PR="${RUNNER_TEMP}/dependabot-pr-revalidated.json"
+          REVALIDATED_COMPARE="${RUNNER_TEMP}/dependabot-compare-revalidated.json"
+          gh api "repos/${EXPECTED_REPOSITORY}/pulls/${PR_NUMBER}" > "${REVALIDATED_PR}"
+          gh api "repos/${EXPECTED_REPOSITORY}/compare/${EXPECTED_BASE_OID}...${EXPECTED_HEAD_OID}" > "${REVALIDATED_COMPARE}"
+          PRE_VALIDATION_OUTPUT="${RUNNER_TEMP}/dependabot-validation-pre-approval.out"
+          PRE_VALIDATION_LOG="${RUNNER_TEMP}/dependabot-validation-pre-approval.log"
+          : > "${PRE_VALIDATION_OUTPUT}"
+          if ! GITHUB_OUTPUT="${PRE_VALIDATION_OUTPUT}" python3 "${VALIDATOR_PATH}" \
+            "${REVALIDATED_PR}" "${REVALIDATED_COMPARE}" > "${PRE_VALIDATION_LOG}"; then
+            echo "pre-approval validator failed; refusing mutation" >&2
+            exit 1
+          fi
+          set +e
+          require_exact_validation_output "${PRE_VALIDATION_OUTPUT}" "${PR_NUMBER}" \
+            "${EXPECTED_BASE_OID}" "${EXPECTED_HEAD_OID}" "${EXPECTED_HEAD_REF}"
+          PRE_VALIDATION_STATUS=$?
+          set -e
+          if [ "${PRE_VALIDATION_STATUS}" -eq 3 ]; then
+            echo "PR became draft during pre-approval revalidation; no mutation"
+            exit 0
+          fi
+          if [ "${PRE_VALIDATION_STATUS}" -ne 0 ]; then
+            echo "pre-approval validator output was not exactly eligible=true; refusing mutation" >&2
+            exit 1
+          fi
+
+          REVIEWS_JSON="${RUNNER_TEMP}/dependabot-reviews.json"
+          gh api --paginate --slurp "repos/${EXPECTED_REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100" > "${REVIEWS_JSON}"
+          APPROVED="$(python3 - "${REVIEWS_JSON}" <<'PYEOF'
+          import json
+          import os
+          import sys
+
+          try:
+              with open(sys.argv[1], encoding="utf-8") as handle:
+                  value = json.load(handle)
+          except (OSError, ValueError) as error:
+              raise SystemExit("invalid reviews API JSON: %s" % error)
+          if not isinstance(value, list):
+              raise SystemExit("reviews response is not a list")
+          pages = [value] if value and all(isinstance(item, dict) for item in value) else value
+          if not all(isinstance(page, list) for page in pages):
+              raise SystemExit("reviews response has a malformed page")
+          approved = False
+          for page in pages:
+              for review in page:
+                  if not isinstance(review, dict) or not isinstance(review.get("user"), dict):
+                      raise SystemExit("review metadata is malformed")
+                  if (
+                      review.get("state") == "APPROVED"
+                      and review.get("commit_id") == os.environ["EXPECTED_HEAD_OID"]
+                      and review["user"].get("login") == "github-actions[bot]"
+                  ):
+                      approved = True
+          print("true" if approved else "false")
+          PYEOF
+          )"
+          if [ "${APPROVED}" != "true" ] && [ "${APPROVED}" != "false" ]; then
+            echo "review state is malformed; refusing mutation" >&2
+            exit 1
+          fi
+          if [ "${APPROVED}" = "false" ]; then
+            REVIEW_JSON="${RUNNER_TEMP}/dependabot-review.json"
+            if ! gh api --method POST "repos/${EXPECTED_REPOSITORY}/pulls/${PR_NUMBER}/reviews" \
+              -f event=APPROVE -f commit_id="${EXPECTED_HEAD_OID}" > "${REVIEW_JSON}"; then
+              echo "GitHub Actions cannot approve PRs; enable Allow GitHub Actions to create and approve pull requests; failing closed" >&2
+              exit 1
+            fi
+            python3 - "${REVIEW_JSON}" <<'PYEOF'
+          import json
+          import os
+          import sys
+
+          try:
+              with open(sys.argv[1], encoding="utf-8") as handle:
+                  review = json.load(handle)
+          except (OSError, ValueError) as error:
+              raise SystemExit("invalid approval response: %s" % error)
+          if not isinstance(review, dict) or not isinstance(review.get("user"), dict):
+              raise SystemExit("approval response metadata is malformed")
+          if (
+              review.get("state") != "APPROVED"
+              or review.get("commit_id") != os.environ["EXPECTED_HEAD_OID"]
+              or review["user"].get("login") != "github-actions[bot]"
+          ):
+              raise SystemExit("approval was not recorded for the exact head by GitHub Actions")
+          PYEOF
+          else
+            echo "existing GitHub Actions approval is already bound to ${EXPECTED_HEAD_OID}"
+          fi
+
+          # Revalidate every identity field immediately before merge as well;
+          # --match-head-commit is the final server-side race check.
+          FINAL_PR="${RUNNER_TEMP}/dependabot-pr-final.json"
+          FINAL_COMPARE="${RUNNER_TEMP}/dependabot-compare-final.json"
+          gh api "repos/${EXPECTED_REPOSITORY}/pulls/${PR_NUMBER}" > "${FINAL_PR}"
+          gh api "repos/${EXPECTED_REPOSITORY}/compare/${EXPECTED_BASE_OID}...${EXPECTED_HEAD_OID}" > "${FINAL_COMPARE}"
+          FINAL_VALIDATION_OUTPUT="${RUNNER_TEMP}/dependabot-validation-final.out"
+          FINAL_VALIDATION_LOG="${RUNNER_TEMP}/dependabot-validation-final.log"
+          : > "${FINAL_VALIDATION_OUTPUT}"
+          if ! GITHUB_OUTPUT="${FINAL_VALIDATION_OUTPUT}" python3 "${VALIDATOR_PATH}" \
+            "${FINAL_PR}" "${FINAL_COMPARE}" > "${FINAL_VALIDATION_LOG}"; then
+            echo "final validator failed; refusing merge" >&2
+            exit 1
+          fi
+          set +e
+          require_exact_validation_output "${FINAL_VALIDATION_OUTPUT}" "${PR_NUMBER}" \
+            "${EXPECTED_BASE_OID}" "${EXPECTED_HEAD_OID}" "${EXPECTED_HEAD_REF}"
+          FINAL_VALIDATION_STATUS=$?
+          set -e
+          if [ "${FINAL_VALIDATION_STATUS}" -eq 3 ]; then
+            echo "PR became draft during final revalidation; no merge mutation"
+            exit 0
+          fi
+          if [ "${FINAL_VALIDATION_STATUS}" -ne 0 ]; then
+            echo "final validator output was not exactly eligible=true; refusing merge" >&2
+            exit 1
+          fi
+          CURRENT_HEAD_OID="$(gh api "repos/${EXPECTED_REPOSITORY}/pulls/${PR_NUMBER}" --jq .head.sha)"
+          if [ "${CURRENT_HEAD_OID}" != "${EXPECTED_HEAD_OID}" ]; then
+            echo "PR head changed before merge; refusing auto-merge" >&2
+            exit 1
+          fi
+          if ! gh pr merge --repo "${EXPECTED_REPOSITORY}" --auto --squash \
+            --match-head-commit "${EXPECTED_HEAD_OID}" "${PR_NUMBER}"; then
+            echo "failed to enable exact commit-bound auto-merge; failing closed" >&2
+            exit 1
+          fi
+          echo "auto-merge enabled for Dependabot PR #${PR_NUMBER} at ${EXPECTED_HEAD_OID}"
