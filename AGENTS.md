@@ -4,16 +4,16 @@ This repo packages Cursor's Grok Bot AppImage as `io.github.viniciosrab.GrokBot`
 
 ## Quick path
 
-1. From the repo root: `python3 tools/test.py` (needs `python3`, `cmake`, and `ctest` on PATH).
-2. That gate is fail-closed: Python unittest discover plus CTest. Zero tests, missing tools, or a skipped layer fails.
-3. It does **not** compile the companion, download AppImages, or prove X3.
+1. From the repo root: `python3 tools/test.py` (needs `python3`, `cmake`, and `ctest` on PATH plus Qt6 Widgets/DBus, KF6StatusNotifierItem, KF6WindowSystem).
+2. That gate is fail-closed: Python unittest discover plus CTest. Zero tests, missing tools, missing Qt6/KF6 deps, or a skipped layer fails.
+3. It compiles the companion by default (`GROK_BOT_BUILD_COMPANION` defaults ON; the gate forces ON), downloads no AppImages, and proves no X3.
 
 ## Commands
 
 | Intent | Command | Notes |
 |--------|---------|--------|
-| Workspace gate | `python3 tools/test.py` | Companion stays off (`GROK_BOT_BUILD_COMPANION` defaults OFF). |
-| Companion locally | `cmake -S . -B build -DGROK_BOT_BUILD_COMPANION=ON` | Needs Qt6 Widgets/DBus, KF6StatusNotifierItem, KF6WindowSystem. Not required for the gate. |
+| Workspace gate | `python3 tools/test.py` | Companion compiled by default (`GROK_BOT_BUILD_COMPANION` defaults ON, gate forces ON); missing Qt6/KF6 fails closed. CI runs the unchanged gate inside `org.kde.Sdk//6.11`. |
+| Companion locally | `cmake -S . -B build` | Needs Qt6 Widgets/DBus, KF6StatusNotifierItem, KF6WindowSystem; ON by default. |
 | Payload build | `flatpak-builder --force-clean --repo=repo build-dir io.github.viniciosrab.GrokBot.yml` | Needs Flathub `org.kde.Platform//6.11` and `org.kde.Sdk//6.11`. Dual-arch: `x86_64` and `aarch64`. |
 | X3 proof | `bash tools/prove_x3.sh` | Repo root, `build-dir` already present. Hosted KDE: Xvfb, real `plasmashell`, `kded5`, `kactivitymanagerd`, GetNameOwner of `org.kde.StatusNotifierWatcher`. Expensive; not a local default. |
 

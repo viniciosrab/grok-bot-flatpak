@@ -104,6 +104,13 @@ METAINFO_PATH = os.path.join(
 )
 COMPANION_SRC = os.path.join(REPO_ROOT, "companion", "src", "main.cpp")
 COMPANION_CMAKE = os.path.join(REPO_ROOT, "companion", "CMakeLists.txt")
+COMPANION_TESTS_DIR = os.path.join(REPO_ROOT, "companion", "tests")
+COMPANION_LIFECYCLE_SRC = os.path.join(
+    COMPANION_TESTS_DIR, "test_lifecycle_posix.cpp"
+)
+COMPANION_TESTS_CMAKE = os.path.join(COMPANION_TESTS_DIR, "CMakeLists.txt")
+WATCHERLESS_SCRIPT = os.path.join(COMPANION_TESTS_DIR, "check_watcherless.sh")
+TOP_CMAKE = os.path.join(REPO_ROOT, "CMakeLists.txt")
 
 WINDOW_ICON = "/app/grok-bot/grok-bot.png"
 ELECTRON_RESOURCE_ICON = "/app/grok-bot/resources/icon.png"
@@ -1247,78 +1254,92 @@ class GracefulQuitContractTests(unittest.TestCase):
 
 
 class UntrackedSingletonContractTests(unittest.TestCase):
-    """Show/Quit must treat a live Electron singleton as running.
+    """Show/Quit against a live Electron singleton belongs to compiled probes.
 
     After hardware-acceleration relaunch, m_child is NotRunning while the
-    new Electron still owns SingletonSocket. Show must second-exec; Quit
-    must SIGTERM that peer via SO_PEERCRED, never by executable name.
+    new Electron still owns SingletonSocket. The decision table, the
+    bounded nonblocking connect, SO_PEERCRED identification, owned
+    process-group shutdown, and cold-start forwarding are proven by
+    companion/tests/test_lifecycle_posix.cpp with REAL temporary Unix
+    sockets and REAL owned child processes (bounded timeouts, no fixture
+    adapters), plus the CTest watcherless negative test for the
+    production binary. These Python checks only wire that coverage in
+    place; they never re-assert the C++ logic via source grep. The POSIX
+    timing probes in test_untracked_singleton.py stay as the
+    OS-semantics reference.
     """
 
-    def test_show_second_execs_live_untracked_singleton(self):
-        companion_src = read_repo_text(COMPANION_SRC)
-        show = companion_src[
-            companion_src.index("void showRequested()") : companion_src.index(
-                "void quitRequested()"
-            )
-        ]
-        self.assertIn("electronSingleInstanceReady()", show)
-        self.assertIn("QProcess::startDetached", show)
-        self.assertIn("startChild()", show)
-        self.assertLess(show.index("startDetached"), show.index("startChild()"))
-        self.assertIn("m_child->state() != QProcess::NotRunning", show)
-
-    def test_quit_signals_live_untracked_singleton(self):
-        companion_src = read_repo_text(COMPANION_SRC)
-        quit_fn = companion_src[
-            companion_src.index("void quitRequested()") : companion_src.index(
-                "void childStarted()"
-            )
-        ]
-        self.assertIn("terminateChildGroup()", quit_fn)
-        self.assertIn("terminateUntrackedElectron()", quit_fn)
-        self.assertIn("qApp->quit()", quit_fn)
-        self.assertIn("SO_PEERCRED", companion_src)
-        self.assertIn("linuxPeerPid", companion_src)
-        self.assertIn("waitForPidExit", companion_src)
-        self.assertIn("pgid == ::getpgrp()", companion_src)
-        for forbidden in ("pkill", "pidof", "pgrep", "killall", "/proc/"):
-            self.assertNotIn(forbidden, companion_src)
-
-    def test_connect_unix_socket_is_nonblocking_and_bounded(self):
-        companion_src = read_repo_text(COMPANION_SRC)
-        body = companion_src[
-            companion_src.index("int connectUnixSocket(") : companion_src.index(
-                "bool unixSocketIsLive("
-            )
-        ]
-        timeout_match = re.search(
-            r"kUnixSocketConnectTimeoutMs = (\d+)", companion_src
-        )
-        self.assertIsNotNone(timeout_match)
-        timeout = int(timeout_match.group(1))
-        self.assertGreaterEqual(timeout, 10)
-        self.assertLessEqual(timeout, 200)
-        self.assertIn("kUnixSocketConnectTimeoutMs", body)
+    def test_compiled_lifecycle_probes_use_real_resources_without_adapters(self):
         self.assertTrue(
-            "SOCK_NONBLOCK" in body or "O_NONBLOCK" in body,
-            "connectUnixSocket must use SOCK_NONBLOCK or fcntl O_NONBLOCK",
+            os.path.isfile(COMPANION_LIFECYCLE_SRC),
+            "companion/tests/test_lifecycle_posix.cpp must exist",
         )
-        self.assertIn("::poll(", body)
-        self.assertIn("SO_ERROR", body)
-        self.assertIn("EINPROGRESS", body)
-        self.assertIn("EALREADY", body)
-        self.assertIn("EAGAIN", body)
-        self.assertIn("EINTR", body)
-        self.assertIn("::close(fd)", body)
-        self.assertIn("#ifdef Q_OS_UNIX", body)
-        self.assertGreaterEqual(body.count("return fd;"), 2)
-        self.assertIn("F_GETFL", body)
-        self.assertIn("F_SETFL", body)
-        self.assertIn("O_NONBLOCK", body)
-        self.assertNotIn("write(", body)
-        self.assertNotIn("send(", body)
-        self.assertNotIn("sendmsg", body)
-        self.assertIn("#include <poll.h>", companion_src)
+        src = read_repo_text(COMPANION_LIFECYCLE_SRC)
+        for required in (
+            "AF_UNIX",
+            "SO_PEERCRED",
+            "killpg",
+            "setsid",
+            "::poll(",
+            "mkdtemp",
+        ):
+            self.assertIn(required, src)
+        for forbidden in ("Fake", "Mock", "Adapter", "Stub"):
+            self.assertNotIn(forbidden, src)
+
+    def test_companion_ctest_covers_lifecycle_and_watcherless_negative(self):
+        companion_cmake = read_repo_text(COMPANION_CMAKE)
+        self.assertIn("add_subdirectory(tests)", companion_cmake)
+        self.assertIn(
+            "companion_watcherless_rejects_headless", companion_cmake
+        )
+        self.assertIn("check_watcherless.sh", companion_cmake)
+        self.assertIn("QT_QPA_PLATFORM=offscreen", companion_cmake)
+        tests_cmake = read_repo_text(COMPANION_TESTS_CMAKE)
+        for case in (
+            "protocol_url_filter",
+            "unix_socket_connect_bounded",
+            "unix_socket_peercred",
+            "owned_process_group_shutdown",
+            "show_quit_decision",
+            "cold_start_forward",
+        ):
+            self.assertIn(case, tests_cmake)
+        self.assertIn("TIMEOUT", tests_cmake)
+        watcherless = read_repo_text(WATCHERLESS_SCRIPT)
+        self.assertIn("StatusNotifierWatcher", watcherless)
+        self.assertIn("NEGATIVE TEST ONLY", watcherless)
+        self.assertIn("prove_x3", watcherless)
+        top_cmake = read_repo_text(TOP_CMAKE)
+        self.assertIn("GROK_BOT_BUILD_COMPANION", top_cmake)
+        runner_src = read_repo_text(TEST_RUNNER_PATH)
+        self.assertIn("-DGROK_BOT_BUILD_COMPANION=ON", runner_src)
+
+    def test_ctest_registers_companion_tests(self):
+        top_cmake = read_repo_text(TOP_CMAKE)
+        # Match the full call lines: the rationale comment above them
+        # mentions both commands, so bare substrings would hit the comment.
+        self.assertIn("\nenable_testing()\n", top_cmake)
+        self.assertIn("\n  add_subdirectory(companion)\n", top_cmake)
+        self.assertLess(
+            top_cmake.index("\nenable_testing()\n"),
+            top_cmake.index("\n  add_subdirectory(companion)\n"),
+            "enable_testing() must precede add_subdirectory(companion) or "
+            "CMake silently drops the compiled lifecycle and watcherless tests",
+        )
+
+    def test_production_lifecycle_paths_remain_for_compiled_probes(self):
+        companion_src = read_repo_text(COMPANION_SRC)
+        for required in (
+            "electronSingleInstanceReady",
+            "linuxPeerPid",
+            "SO_PEERCRED",
+            "terminateChildGroup",
+            "terminateUntrackedElectron",
+            "deliverColdProtocolUrls",
+            "forwardProtocolUrls",
+        ):
+            self.assertIn(required, companion_src)
 
 
 class ZypakSubmoduleContractTests(unittest.TestCase):
@@ -1508,6 +1529,13 @@ class AtomicContentContractTests(unittest.TestCase):
         self.assertIn(WATCHER_NAME, text)
         self.assertIn("grok-bot-companion", text)
         self.assertIn("launch", text.lower())
+
+    def test_validate_unit_runs_gate_in_kde_sdk_fail_closed(self):
+        text = read_repo_text(VALIDATE_WORKFLOW_PATH)
+        self.assertIn("python3 tools/test.py", text)
+        self.assertIn("org.kde.Sdk//6.11", text)
+        self.assertIn("flatpak run", text)
+        self.assertNotIn("GROK_BOT_BUILD_COMPANION=OFF", text)
 
     def test_validate_has_no_positive_x3_proof(self):
         text = read_repo_text(VALIDATE_WORKFLOW_PATH)
