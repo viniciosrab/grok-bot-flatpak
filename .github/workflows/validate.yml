@@ -27,15 +27,32 @@ permissions:
 
 jobs:
   unit:
+    # The workspace gate compiles the KF6 tray companion, so this job runs
+    # it inside the same KDE 6.11 SDK the payload builds against. The bare
+    # ubuntu-24.04 runner has no Qt6 Widgets/DBus or KF6StatusNotifierItem /
+    # KF6WindowSystem and fails at CMake configure. Running the unchanged
+    # gate in the SDK keeps missing-dependency failures fail-closed instead
+    # of skipped. NOT X3 proof: no watcher, no display, no launch here.
     runs-on: ubuntu-24.04
     steps:
       - name: Check out the repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Run the workspace gate
+      - name: Install the Flatpak toolchain and KDE 6.11 runtime
         run: |
           set -euo pipefail
-          python3 tools/test.py
+          sudo apt-get update
+          sudo apt-get install -y flatpak flatpak-builder
+          sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+          sudo flatpak install -y flathub org.kde.Platform//6.11 org.kde.Sdk//6.11
+
+      - name: Run the workspace gate inside the KDE 6.11 SDK
+        run: |
+          set -euo pipefail
+          # Qt6/KF6 come from the SDK, never from the bare runner, and the
+          # gate itself is unchanged: the companion stays ON and every layer
+          # stays fail-closed.
+          flatpak run --command=bash --filesystem="${GITHUB_WORKSPACE}" org.kde.Sdk//6.11 -c "cd '${GITHUB_WORKSPACE}' && python3 tools/test.py"
 
   build-x86_64:
     runs-on: ubuntu-24.04

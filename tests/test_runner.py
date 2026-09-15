@@ -1315,6 +1315,19 @@ class UntrackedSingletonContractTests(unittest.TestCase):
         runner_src = read_repo_text(TEST_RUNNER_PATH)
         self.assertIn("-DGROK_BOT_BUILD_COMPANION=ON", runner_src)
 
+    def test_ctest_registers_companion_tests(self):
+        top_cmake = read_repo_text(TOP_CMAKE)
+        # Match the full call lines: the rationale comment above them
+        # mentions both commands, so bare substrings would hit the comment.
+        self.assertIn("\nenable_testing()\n", top_cmake)
+        self.assertIn("\n  add_subdirectory(companion)\n", top_cmake)
+        self.assertLess(
+            top_cmake.index("\nenable_testing()\n"),
+            top_cmake.index("\n  add_subdirectory(companion)\n"),
+            "enable_testing() must precede add_subdirectory(companion) or "
+            "CMake silently drops the compiled lifecycle and watcherless tests",
+        )
+
     def test_production_lifecycle_paths_remain_for_compiled_probes(self):
         companion_src = read_repo_text(COMPANION_SRC)
         for required in (
@@ -1516,6 +1529,13 @@ class AtomicContentContractTests(unittest.TestCase):
         self.assertIn(WATCHER_NAME, text)
         self.assertIn("grok-bot-companion", text)
         self.assertIn("launch", text.lower())
+
+    def test_validate_unit_runs_gate_in_kde_sdk_fail_closed(self):
+        text = read_repo_text(VALIDATE_WORKFLOW_PATH)
+        self.assertIn("python3 tools/test.py", text)
+        self.assertIn("org.kde.Sdk//6.11", text)
+        self.assertIn("flatpak run", text)
+        self.assertNotIn("GROK_BOT_BUILD_COMPANION=OFF", text)
 
     def test_validate_has_no_positive_x3_proof(self):
         text = read_repo_text(VALIDATE_WORKFLOW_PATH)
