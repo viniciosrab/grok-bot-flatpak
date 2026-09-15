@@ -48,13 +48,7 @@ jobs:
       - name: Verify the x86_64 Source Checksum
         run: |
           set -euo pipefail
-          URL="$(grep -A3 'x86_64:' data/pins.yml | grep 'url:' | awk '{print $2}')"
-          DIGEST="$(grep -A3 'x86_64:' data/pins.yml | grep 'sha256:' | awk '{print $2}')"
-          test -n "${URL}" || { echo "missing x86_64 pin" >&2; exit 1; }
-          test -n "${DIGEST}" || { echo "missing x86_64 digest" >&2; exit 1; }
-          curl -sSL --fail -o upstream.AppImage "${URL}"
-          printf '%s  %s\n' "${DIGEST}" upstream.AppImage | sha256sum -c -
-          test "$(stat -c%s upstream.AppImage)" -gt 0 || { echo "empty artifact" >&2; exit 1; }
+          python3 tools/source_checksum.py --pins data/pins.yml --arch x86_64
 
       - name: Install the Flatpak toolchain and KDE 6.11 runtime
         run: |
@@ -108,13 +102,7 @@ jobs:
       - name: Verify the aarch64 Source Checksum
         run: |
           set -euo pipefail
-          URL="$(grep -A3 'aarch64:' data/pins.yml | grep 'url:' | awk '{print $2}')"
-          DIGEST="$(grep -A3 'aarch64:' data/pins.yml | grep 'sha256:' | awk '{print $2}')"
-          test -n "${URL}" || { echo "missing aarch64 pin" >&2; exit 1; }
-          test -n "${DIGEST}" || { echo "missing aarch64 digest" >&2; exit 1; }
-          curl -sSL --fail -o upstream.AppImage "${URL}"
-          printf '%s  %s\n' "${DIGEST}" upstream.AppImage | sha256sum -c -
-          test "$(stat -c%s upstream.AppImage)" -gt 0 || { echo "empty artifact" >&2; exit 1; }
+          python3 tools/source_checksum.py --pins data/pins.yml --arch aarch64
 
       - name: Install the Flatpak toolchain and KDE 6.11 runtime
         run: |

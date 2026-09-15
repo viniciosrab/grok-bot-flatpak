@@ -22,16 +22,35 @@ the same contracts; they fail (RED) until task 2.1 creates those files.
 """
 
 import hashlib
-import hmac
+import importlib.util
 import os
 import re
 import shlex
+import tempfile
 import unittest
 from urllib.parse import urlsplit
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PINS_PATH = os.path.join(REPO_ROOT, "data", "pins.yml")
 PIN_WORKFLOW_PATH = os.path.join(REPO_ROOT, ".github", "workflows", "pin.yml")
+SOURCE_CHECKSUM_PATH = os.path.join(REPO_ROOT, "tools", "source_checksum.py")
+
+
+def load_source_checksum():
+    """Import tools/source_checksum.py without adding tools/ to sys.path."""
+    spec = importlib.util.spec_from_file_location(
+        "source_checksum", SOURCE_CHECKSUM_PATH
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_SOURCE_CHECKSUM = load_source_checksum()
+verify_bytes_against_digest = _SOURCE_CHECKSUM.verify_bytes_against_digest
+verify_pinned_artifact = _SOURCE_CHECKSUM.verify_pinned_artifact
+SourceChecksumError = _SOURCE_CHECKSUM.SourceChecksumError
 
 FEED_X64 = "https://api2.cursor.sh/updates/api/download/stable/linux-x64/sand"
 FEED_ARM64 = "https://api2.cursor.sh/updates/api/download/stable/linux-arm64/sand"
@@ -108,14 +127,6 @@ def load_pins() -> dict:
 
 def is_hex_digest(value: object) -> bool:
     return isinstance(value, str) and bool(HEX64_RE.match(value))
-
-
-def verify_bytes_against_digest(data: bytes, digest: str) -> bool:
-    """Accept only bytes whose SHA-256 matches the pinned digest."""
-    if not is_hex_digest(digest):
-        return False
-    actual = hashlib.sha256(data).hexdigest()
-    return hmac.compare_digest(actual, digest)
 
 
 def is_appimage_artifact_url(url: object) -> bool:
@@ -497,6 +508,101 @@ class DigestContractTests(unittest.TestCase):
         self.assertFalse(verify_bytes_against_digest(b"x", "c082fda9"))
         self.assertFalse(verify_bytes_against_digest(b"x", "Z" * 64))
         self.assertFalse(verify_bytes_against_digest(b"x", None))
+
+
+class SourceChecksumProofTests(unittest.TestCase):
+    """verify_pinned_artifact is the single production proof seam.
+
+    Stub fetchers cross the same interface the validate jobs use, so
+    these tests prove the retrieval wiring (parse pin, download fresh,
+    reject empty/mismatch/network) without network access.
+    """
+
+    def write_pins(self, directory, entries):
+        path = os.path.join(directory, "pins.yml")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write("version: 0.47.0\narchitectures:\n")
+            for arch, (url, digest) in entries.items():
+                handle.write(
+                    f"  {arch}:\n    url: {url}\n    sha256: {digest}\n"
+                )
+        return path
+
+    def test_matching_bytes_verify_and_return_pin(self):
+        data = b"grok-bot-pinned-bytes"
+        url = "https://downloads.cursor.com/x.AppImage"
+        digest = hashlib.sha256(data).hexdigest()
+        seen = []
+        with tempfile.TemporaryDirectory() as tmp:
+            pins = self.write_pins(tmp, {"x86_64": (url, digest)})
+            result = verify_pinned_artifact(
+                pins, "x86_64", fetch=lambda u: seen.append(u) or data
+            )
+        self.assertEqual(result, (url, digest))
+        self.assertEqual(seen, [url])
+
+    def test_changed_bytes_rejected(self):
+        data = b"grok-bot-pinned-bytes"
+        url = "https://downloads.cursor.com/x.AppImage"
+        digest = hashlib.sha256(data).hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            pins = self.write_pins(tmp, {"x86_64": (url, digest)})
+            with self.assertRaisesRegex(SourceChecksumError, "mismatch"):
+                verify_pinned_artifact(
+                    pins, "x86_64", fetch=lambda u: data + b"x"
+                )
+
+    def test_empty_bytes_rejected(self):
+        url = "https://downloads.cursor.com/x.AppImage"
+        digest = hashlib.sha256(b"").hexdigest()
+        with tempfile.TemporaryDirectory() as tmp:
+            pins = self.write_pins(tmp, {"x86_64": (url, digest)})
+            with self.assertRaisesRegex(SourceChecksumError, "empty"):
+                verify_pinned_artifact(pins, "x86_64", fetch=lambda u: b"")
+
+    def test_network_error_fails_closed(self):
+        url = "https://downloads.cursor.com/x.AppImage"
+        digest = hashlib.sha256(b"x").hexdigest()
+        def boom(request_url):
+            raise OSError("connection reset")
+        with tempfile.TemporaryDirectory() as tmp:
+            pins = self.write_pins(tmp, {"x86_64": (url, digest)})
+            with self.assertRaisesRegex(SourceChecksumError, "failed to download"):
+                verify_pinned_artifact(pins, "x86_64", fetch=boom)
+
+    def test_missing_arch_pin_never_downloads(self):
+        url = "https://downloads.cursor.com/x.AppImage"
+        digest = hashlib.sha256(b"x").hexdigest()
+        called = []
+        with tempfile.TemporaryDirectory() as tmp:
+            pins = self.write_pins(tmp, {"x86_64": (url, digest)})
+            with self.assertRaisesRegex(SourceChecksumError, "missing aarch64 pin"):
+                verify_pinned_artifact(
+                    pins, "aarch64", fetch=lambda u: called.append(u) or b"x"
+                )
+        self.assertEqual(called, [])
+
+    def test_malformed_digest_fails_closed_without_download(self):
+        url = "https://downloads.cursor.com/x.AppImage"
+        called = []
+        with tempfile.TemporaryDirectory() as tmp:
+            pins = self.write_pins(tmp, {"x86_64": (url, "not-a-digest")})
+            with self.assertRaisesRegex(SourceChecksumError, "missing x86_64 digest"):
+                verify_pinned_artifact(
+                    pins, "x86_64", fetch=lambda u: called.append(u) or b"x"
+                )
+        self.assertEqual(called, [])
+
+    def test_real_pins_wire_each_arch_to_its_url(self):
+        pins = load_pins()
+        for arch in ("x86_64", "aarch64"):
+            seen = []
+            with self.assertRaises(SourceChecksumError):
+                verify_pinned_artifact(
+                    PINS_PATH, arch, fetch=lambda u: seen.append(u) or b"probe"
+                )
+            self.assertEqual(seen, [pins["architectures"][arch]["url"]])
+            self.assertTrue(seen[0].startswith("https://"))
 
 
 class ArtifactUrlContractTests(unittest.TestCase):
