@@ -444,6 +444,7 @@ class DependabotAutomergeWorkflowTests(unittest.TestCase):
             self.assertIn(marker, text, marker)
         for marker in (
             'base_commit.get("sha") != expected_base_oid',
+            'head_commit.get("sha") != expected_head_oid',
             'commits[-1]["sha"] != expected_head_oid',
             r'FILE_RE = re.compile(r"^\.github/workflows/[^/]+\.yml$")',
             'item.get("status") != "modified"',
@@ -463,6 +464,44 @@ class DependabotAutomergeWorkflowTests(unittest.TestCase):
         self.assertNotIn("--admin", text)
         self.assertIn('gh pr merge --repo "${EXPECTED_REPOSITORY}" --auto --squash \\', text)
         self.assertIn('--match-head-commit "${EXPECTED_HEAD_OID}" "${PR_NUMBER}"', text)
+
+    def test_main_capture_bootstrap_stays_minimal(self):
+        text = read_text(DEPENDABOT_AUTOMERGE_PATH)
+        helper = read_text(os.path.join(REPO_ROOT, "tools", "validate_dependabot_actions.py"))
+        self.assertIn("Full Dependabot identity", text)
+        blocks = text.split("<<'PYEOF'")
+        capture = None
+        for part in blocks[1:]:
+            body = part.split("PYEOF", 1)[0]
+            if "(base_oid, head_oid, head_ref)" in body:
+                capture = body
+                break
+        self.assertIsNotNone(capture, "main capture bootstrap must exist")
+        assert capture is not None
+        for marker in (
+            "pull request base repository is not exact",
+            "pull request base is not main",
+            "pull request base OID is not a full lowercase SHA",
+            "pull request head OID is not a full lowercase SHA",
+        ):
+            self.assertIn(marker, capture, marker)
+        for absent in (
+            "dependabot[bot]",
+            "allowlisted Action",
+            "expected Dependabot branch",
+            "is not open",
+            "draft",
+            "ACTIONS",
+            "HEAD_RE",
+        ):
+            self.assertNotIn(absent, capture, absent)
+        for marker in (
+            "pull request author is not exactly dependabot[bot]",
+            "pull request is not open; refusing auto-merge",
+            "pull request head does not identify an allowlisted Action",
+            "draft state is missing or malformed",
+        ):
+            self.assertIn(marker, helper, marker)
 
     def test_valid_hostile_boundary_fixture_is_accepted(self):
         ok, result = run_automerge_validator(
@@ -599,6 +638,40 @@ class DependabotAutomergeWorkflowTests(unittest.TestCase):
                 valid_dependabot_pr(), [valid_action_patch()], compare=compare
             )
             self.assertFalse(ok, field)
+
+    def test_compare_head_commit_oid_is_bound_to_captured_head(self):
+        hostile_heads = (
+            {"sha": "c" * 40},
+            {"sha": "B" * 40},
+            {"sha": ""},
+            {},
+            None,
+            "b" * 40,
+        )
+        for head_commit in hostile_heads:
+            compare = {
+                "base_commit": {"sha": "a" * 40},
+                "head_commit": head_commit,
+                "status": "ahead",
+                "total_commits": 1,
+                "commits": [{"sha": "b" * 40}],
+                "files": [valid_action_patch()],
+            }
+            ok, _result = run_automerge_validator(
+                valid_dependabot_pr(), [valid_action_patch()], compare=compare
+            )
+            self.assertFalse(ok, head_commit)
+        missing = {
+            "base_commit": {"sha": "a" * 40},
+            "status": "ahead",
+            "total_commits": 1,
+            "commits": [{"sha": "b" * 40}],
+            "files": [valid_action_patch()],
+        }
+        ok, _result = run_automerge_validator(
+            valid_dependabot_pr(), [valid_action_patch()], compare=missing
+        )
+        self.assertFalse(ok)
 
     def test_event_number_is_bound_to_the_api_pr(self):
         ok, _result = run_automerge_validator(

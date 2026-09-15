@@ -154,24 +154,18 @@ jobs:
           BASE_OID_FILE="${RUNNER_TEMP}/dependabot-base-oid"
           HEAD_OID_FILE="${RUNNER_TEMP}/dependabot-head-oid"
           HEAD_REF_FILE="${RUNNER_TEMP}/dependabot-head-ref"
+          # Minimal bootstrap: bind the API record to the event and prove the
+          # base is the exact main repository before fetching the trusted
+          # validator from that base OID. Full Dependabot identity, head
+          # allowlist, draft, and diff policy live in the validator from the
+          # base commit; this block must not duplicate them.
           python3 - "${PR_JSON}" "${BASE_OID_FILE}" "${HEAD_OID_FILE}" "${HEAD_REF_FILE}" <<'PYEOF'
           import json
           import os
           import re
           import sys
 
-          ACTIONS = (
-              "actions/checkout",
-              "actions/create-github-app-token",
-              "actions/upload-artifact",
-              "actions/download-artifact",
-              "actions/upload-pages-artifact",
-              "actions/deploy-pages",
-          )
           COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
-          HEAD_RE = re.compile(
-              r"^dependabot/github_actions/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+-[0-9][A-Za-z0-9_.-]*$"
-          )
 
           try:
               with open(sys.argv[1], encoding="utf-8") as handle:
@@ -181,46 +175,32 @@ jobs:
           if not isinstance(pr, dict):
               raise SystemExit("pull request response is not an object")
           number = os.environ["EVENT_PR_NUMBER"]
+          if not number.isdigit() or int(number) <= 0:
+              raise SystemExit("event pull request number is malformed")
           if pr.get("number") != int(number):
               raise SystemExit("API pull request number differs from the event")
-          if pr.get("state") != "open":
-              raise SystemExit("pull request is not open; refusing auto-merge")
-          if pr.get("user", {}).get("login") != "dependabot[bot]":
-              raise SystemExit("pull request author is not exactly dependabot[bot]")
           base = pr.get("base")
           head = pr.get("head")
           if not isinstance(base, dict) or not isinstance(head, dict):
               raise SystemExit("pull request base/head metadata is malformed")
           expected_repo = os.environ["EXPECTED_REPOSITORY"]
-          if base.get("ref") != "main" or base.get("repo", {}).get("full_name") != expected_repo:
-              raise SystemExit("pull request base is not the exact main repository")
-          if head.get("repo", {}).get("full_name") != expected_repo:
-              raise SystemExit("pull request head repository is not exact")
-          head_ref = head.get("ref")
-          if not isinstance(head_ref, str) or not HEAD_RE.fullmatch(head_ref):
-              raise SystemExit("pull request head is not an expected Dependabot branch")
-          action_ref = head_ref[len("dependabot/github_actions/"):]
-          if not any(
-              action_ref == action or action_ref.startswith(action + "-")
-              for action in ACTIONS
-          ):
-              raise SystemExit("pull request head does not identify an allowlisted Action")
+          base_repo = base.get("repo")
+          if not isinstance(base_repo, dict) or base_repo.get("full_name") != expected_repo:
+              raise SystemExit("pull request base repository is not exact")
+          if base.get("ref") != "main":
+              raise SystemExit("pull request base is not main")
           base_oid = base.get("sha")
           head_oid = head.get("sha")
+          head_ref = head.get("ref")
           if not isinstance(base_oid, str) or not COMMIT_RE.fullmatch(base_oid):
               raise SystemExit("pull request base OID is not a full lowercase SHA")
           if not isinstance(head_oid, str) or not COMMIT_RE.fullmatch(head_oid):
               raise SystemExit("pull request head OID is not a full lowercase SHA")
+          if not isinstance(head_ref, str) or not head_ref:
+              raise SystemExit("pull request head ref is malformed")
           for path, value in zip(sys.argv[2:], (base_oid, head_oid, head_ref)):
               with open(path, "w", encoding="utf-8") as handle:
                   handle.write(value + "\n")
-          if pr.get("draft") is True:
-              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
-                  handle.write("eligible=false\n")
-              print("draft Dependabot PR; no auto-merge mutation")
-              raise SystemExit(0)
-          if pr.get("draft") is not False:
-              raise SystemExit("draft state is missing or malformed")
           PYEOF
           BASE_OID="$(cat "${BASE_OID_FILE}")"
           HEAD_OID="$(cat "${HEAD_OID_FILE}")"

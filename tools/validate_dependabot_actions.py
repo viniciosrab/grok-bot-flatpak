@@ -263,6 +263,9 @@ def validate_compare(
     base_commit = compare.get("base_commit")
     if not isinstance(base_commit, dict) or base_commit.get("sha") != expected_base_oid:
         reject("compare response base OID is not the captured base OID")
+    head_commit = compare.get("head_commit")
+    if not isinstance(head_commit, dict) or head_commit.get("sha") != expected_head_oid:
+        reject("compare response head OID is not the captured head OID")
     commits = compare.get("commits")
     total_commits = compare.get("total_commits")
     if (
