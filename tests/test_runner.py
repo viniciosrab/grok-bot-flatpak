@@ -1644,8 +1644,15 @@ class AtomicContentContractTests(unittest.TestCase):
 
     def test_validate_fails_arch_on_source_failure(self):
         text = read_repo_text(VALIDATE_WORKFLOW_PATH)
-        self.assertIn("sha256sum", text)
+        self.assertIn("tools/source_checksum.py", text)
+        self.assertIn("--arch x86_64", text)
+        self.assertIn("--arch aarch64", text)
         self.assertIn("exit 1", text)
+        module_text = read_repo_text(
+            os.path.join(REPO_ROOT, "tools", "source_checksum.py")
+        )
+        self.assertIn("hashlib.sha256", module_text)
+        self.assertIn("SourceChecksumError", module_text)
 
     def test_manifest_sources_match_pins(self):
         manifest_text = read_repo_text(MANIFEST_PATH)
