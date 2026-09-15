@@ -1,6 +1,14 @@
 # Unofficial Grok Bot Flatpak
 
+[![validate](https://github.com/viniciosrab/grok-bot-flatpak/actions/workflows/validate.yml/badge.svg)](https://github.com/viniciosrab/grok-bot-flatpak/actions/workflows/validate.yml)
+[![architectures: x86_64 | aarch64](https://img.shields.io/badge/architectures-x86__64%20%7C%20aarch64-blue)](#compatibility)
+[![license: MIT](https://img.shields.io/github/license/viniciosrab/grok-bot-flatpak)](LICENSE)
+
 Grok Bot packaged as a Flatpak (`io.github.viniciosrab.GrokBot`) for Linux on `x86_64` and `aarch64`. Install and update it from this repository's Pages Flatpak repository.
+
+## Why this exists
+
+Upstream ships Grok Bot as an AppImage. This project adds sandboxed Flatpak distribution, signed updates, KDE tray integration, dual-architecture support, and pinned packaging.
 
 > [!IMPORTANT]
 > This is an **unofficial, community-maintained package**. It is not endorsed, published, or supported by the Grok Bot vendor.
