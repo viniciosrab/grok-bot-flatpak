@@ -34,17 +34,19 @@ Record the `python3 tools/test.py` result plus focused or runtime evidence, and 
 | Need | Requirement |
 |------|-------------|
 | Workspace gate | `python3`, `cmake`, and `ctest` on `PATH` |
-| Companion build (optional) | Qt6 Widgets/DBus, KF6StatusNotifierItem, KF6WindowSystem |
+| Companion build (always ON) | Qt6 Widgets/DBus, KF6StatusNotifierItem, KF6WindowSystem; missing deps fail the gate closed |
 | Payload build (optional) | `flatpak-builder` plus Flathub `org.kde.Platform//6.11` and `org.kde.Sdk//6.11` |
 
 ## Workflow
 
-- The gate is fail-closed: Python unittest discovery plus CTest must both pass. Zero tests, missing tools, or a skipped layer fails. It does not compile the companion, download AppImages, or prove X3.
-- The companion stays off by default. Build it only when needed:
+- The gate is fail-closed: Python unittest discovery plus CTest must both pass. Zero tests, missing tools, missing Qt6/KF6 deps, or a skipped layer fails. It compiles the companion, downloads no AppImages, and proves no X3.
+- The companion defaults ON (`GROK_BOT_BUILD_COMPANION` defaults ON and the gate forces it ON). Configure and build it locally with:
 
 ```bash
-cmake -S . -B build -DGROK_BOT_BUILD_COMPANION=ON
+cmake -S . -B build
 ```
+
+  `-DGROK_BOT_BUILD_COMPANION=OFF` is a developer-only configure escape (supported by the root `CMakeLists.txt` option) and does not satisfy the workspace gate — CI runs the unchanged gate inside `org.kde.Sdk//6.11`.
 
 - A full payload build is optional and dual-arch (`x86_64` and `aarch64`):
 
