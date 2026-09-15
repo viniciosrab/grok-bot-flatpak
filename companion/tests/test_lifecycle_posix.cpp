@@ -1,15 +1,13 @@
 // Compiled lifecycle probes for the Grok Bot tray companion.
 //
-// These tests exercise the same OS contracts as companion/src/main.cpp
+// These tests exercise the shared production lifecycle helper module
 // (bounded nonblocking AF_UNIX probe, SO_PEERCRED peer identification,
 // owned process-group graceful shutdown, protocol-URL filtering, and the
 // cold-start wait-and-forward loop) using REAL temporary Unix sockets and
 // REAL owned child processes with bounded timeouts.
 //
-// There is deliberately NO fixture adapter in this file: only one
-// production implementation exists, so a seam with a fake would be a
-// hypothetical seam. Every probe below crosses the same interface the
-// production helpers use, against the real syscalls.
+// There is deliberately NO fixture adapter in this file: every probe below
+// calls the same production helper implementation used by the companion.
 //
 // Linux-only: AF_UNIX, SO_PEERCRED, setsid/killpg are required. Every
 // wait stays bounded; CTest adds an outer TIMEOUT as well.
@@ -22,8 +20,10 @@
 #include <thread>
 #include <vector>
 
+#include <QCoreApplication>
+#include "lifecycle_helpers.h"
+
 #include <errno.h>
-#include <fcntl.h>
 #include <poll.h>
 #include <signal.h>
 #include <sys/socket.h>
@@ -39,20 +39,15 @@
 
 namespace {
 
-// Mirrors companion kUnixSocketConnectTimeoutMs: the UI wait stays small.
-constexpr int kConnectTimeoutMs = 50;
+// The production helper owns this bound; the test only names it for timing
+// assertions around the real implementation.
+constexpr int kConnectTimeoutMs = companion::lifecycle::kUnixSocketConnectTimeoutMs;
 // Blocking observers must outlive that bound to prove the difference.
 constexpr int kBlockingObserveMs = 150;
 constexpr int kTimingToleranceMs = 40;
 // Test-local outer bound for poll loops that mirror production waits.
 constexpr int kProbeTimeoutMs = 5000;
 constexpr int kPollSliceMs = 50;
-
-struct PeerCred {
-    pid_t pid;
-    uid_t uid;
-    gid_t gid;
-};
 
 long long nowMs()
 {
@@ -63,160 +58,6 @@ long long nowMs()
 void sleepMs(int ms)
 {
     poll(nullptr, 0, ms);
-}
-
-// Mirrors isProtocolUrl/protocolUrlsFrom in companion/src/main.cpp.
-bool isProtocolUrl(const std::string &arg)
-{
-    return arg.rfind("grokbot:", 0) == 0 || arg.rfind("sand:", 0) == 0;
-}
-
-std::vector<std::string> protocolUrlsFrom(const std::vector<std::string> &args)
-{
-    std::vector<std::string> urls;
-    for (size_t i = 1; i < args.size(); ++i) {
-        if (isProtocolUrl(args[i])) {
-            urls.push_back(args[i]);
-        }
-    }
-    return urls;
-}
-
-// Mirrors showRequested/quitRequested in CompanionController.
-std::string showAction(bool childRunning, bool socketLive)
-{
-    if (childRunning || socketLive) {
-        return "startDetached";
-    }
-    return "startChild";
-}
-
-std::string quitAction(bool childRunning, bool socketLive)
-{
-    if (childRunning) {
-        return "terminateChildGroup";
-    }
-    if (socketLive) {
-        return "sigterm_peer";
-    }
-    return "companion_only";
-}
-
-// Mirrors connectUnixSocket in companion/src/main.cpp: connect only, never
-// write protocol bytes, bounded by kConnectTimeoutMs. Returns the fd or -1.
-int connectUnixSocket(const std::string &socketPath)
-{
-    if (socketPath.empty() || socketPath.size() >= sizeof(sockaddr_un::sun_path)) {
-        return -1;
-    }
-#ifdef SOCK_NONBLOCK
-    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
-#else
-    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
-#endif
-    if (fd < 0) {
-        return -1;
-    }
-#ifndef SOCK_NONBLOCK
-    const int flags = ::fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
-        ::close(fd);
-        return -1;
-    }
-#endif
-
-    sockaddr_un addr{};
-    addr.sun_family = AF_UNIX;
-    std::memcpy(addr.sun_path, socketPath.c_str(), socketPath.size());
-
-    const long long deadline = nowMs() + kConnectTimeoutMs;
-    for (;;) {
-        if (::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == 0) {
-            return fd;
-        }
-        const int err = errno;
-        if (err == EINTR) {
-            if (nowMs() >= deadline) {
-                ::close(fd);
-                return -1;
-            }
-            continue;
-        }
-        if (err == EINPROGRESS || err == EALREADY) {
-            for (;;) {
-                const long long remaining = deadline - nowMs();
-                if (remaining <= 0) {
-                    ::close(fd);
-                    return -1;
-                }
-                pollfd ready{};
-                ready.fd = fd;
-                ready.events = POLLOUT;
-                const int rc = ::poll(&ready, 1, static_cast<int>(remaining));
-                if (rc < 0) {
-                    if (errno == EINTR) {
-                        continue;
-                    }
-                    ::close(fd);
-                    return -1;
-                }
-                if (rc == 0) {
-                    ::close(fd);
-                    return -1;
-                }
-                int soError = 0;
-                socklen_t soLen = sizeof(soError);
-                if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &soError, &soLen) != 0
-                    || soError != 0) {
-                    ::close(fd);
-                    return -1;
-                }
-                return fd;
-            }
-        }
-        if (err == EAGAIN || err == EWOULDBLOCK) {
-            const long long remaining = deadline - nowMs();
-            if (remaining <= 0) {
-                ::close(fd);
-                return -1;
-            }
-            poll(nullptr, 0, static_cast<int>(remaining));
-            if (nowMs() >= deadline) {
-                ::close(fd);
-                return -1;
-            }
-            continue;
-        }
-        ::close(fd);
-        return -1;
-    }
-}
-
-bool unixSocketIsLive(const std::string &socketPath)
-{
-    const int fd = connectUnixSocket(socketPath);
-    if (fd < 0) {
-        return false;
-    }
-    ::close(fd);
-    return true;
-}
-
-bool peerCredOf(const std::string &socketPath, PeerCred *out)
-{
-    const int fd = connectUnixSocket(socketPath);
-    if (fd < 0) {
-        return false;
-    }
-    PeerCred cred{};
-    socklen_t len = sizeof(cred);
-    const int rc = ::getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len);
-    ::close(fd);
-    if (rc != 0 || cred.pid <= 1) {
-        return false;
-    }
-    *out = cred;
-    return true;
 }
 
 std::string makeTempDir()
@@ -286,29 +127,6 @@ bool saturateListener(const std::string &path, int *serverFd,
     return false;
 }
 
-// Zero-signal probe mirroring CompanionController::groupExited: true when
-// no process remains in pgid. EPERM (exists, no permission) counts as alive.
-bool groupExited(pid_t pgid)
-{
-    errno = 0;
-    return ::killpg(pgid, 0) != 0 && errno == ESRCH;
-}
-
-bool waitForProcessGroupExit(pid_t pgid, int timeoutMs)
-{
-    const long long deadline = nowMs() + timeoutMs;
-    for (;;) {
-        if (groupExited(pgid)) {
-            return true;
-        }
-        if (nowMs() >= deadline) {
-            break;
-        }
-        sleepMs(kPollSliceMs);
-    }
-    return groupExited(pgid);
-}
-
 #define CHECK(cond)                                                            \
     do {                                                                       \
         if (!(cond)) {                                                         \
@@ -319,22 +137,22 @@ bool waitForProcessGroupExit(pid_t pgid, int timeoutMs)
 
 bool testProtocolUrlFilter()
 {
-    CHECK(isProtocolUrl("grokbot:auth?code=1"));
-    CHECK(isProtocolUrl("sand:open"));
-    CHECK(!isProtocolUrl("/app/bin/grok-bot-electron"));
-    CHECK(!isProtocolUrl("https://example.invalid"));
-    CHECK(!isProtocolUrl(""));
-    const std::vector<std::string> argv = {
-        "grok-bot-companion", "/app/bin/grok-bot-electron",
-        "grokbot:auth?code=1", "sand:open", "--other",
+    CHECK(companion::lifecycle::isProtocolUrl(QStringLiteral("grokbot:auth?code=1")));
+    CHECK(companion::lifecycle::isProtocolUrl(QStringLiteral("sand:open")));
+    CHECK(!companion::lifecycle::isProtocolUrl(QStringLiteral("/app/bin/grok-bot-electron")));
+    CHECK(!companion::lifecycle::isProtocolUrl(QStringLiteral("https://example.invalid")));
+    CHECK(!companion::lifecycle::isProtocolUrl(QString()));
+    const QStringList argv = {
+        QStringLiteral("grok-bot-companion"), QStringLiteral("/app/bin/grok-bot-electron"),
+        QStringLiteral("grokbot:auth?code=1"), QStringLiteral("sand:open"), QStringLiteral("--other"),
     };
-    const std::vector<std::string> urls = protocolUrlsFrom(argv);
+    const QStringList urls = companion::lifecycle::protocolUrlsFrom(argv);
     CHECK(urls.size() == 2);
-    CHECK(urls[0] == "grokbot:auth?code=1");
-    CHECK(urls[1] == "sand:open");
+    CHECK(urls[0] == QStringLiteral("grokbot:auth?code=1"));
+    CHECK(urls[1] == QStringLiteral("sand:open"));
     // argv[0] is never treated as a URL even when it looks like a scheme.
-    const std::vector<std::string> onlyFirst = {"grokbot:auth"};
-    CHECK(protocolUrlsFrom(onlyFirst).empty());
+    const QStringList onlyFirst = {QStringLiteral("grokbot:auth")};
+    CHECK(companion::lifecycle::protocolUrlsFrom(onlyFirst).empty());
     return true;
 }
 
@@ -352,7 +170,7 @@ bool testUnixSocketConnectBounded()
     const bool saturated = saturateListener(path, &server, &fillers);
     CHECK(saturated);
     const long long start = nowMs();
-    const int fd = connectUnixSocket(path);
+    const int fd = companion::lifecycle::connectUnixSocket(QString::fromStdString(path));
     const long long elapsed = nowMs() - start;
     if (fd >= 0) {
         ::close(fd);
@@ -399,21 +217,22 @@ bool testUnixSocketPeercred()
             accepted = ::accept(server, nullptr, nullptr);
         }
     });
-    PeerCred cred{};
-    const bool ok = peerCredOf(path, &cred);
+    companion::lifecycle::LinuxPeerCredentials credentials{};
+    const bool credentialsRead = companion::lifecycle::linuxPeerCredentials(
+        QString::fromStdString(path), &credentials);
     waiter.join();
     ::close(server);
     if (accepted >= 0) {
         ::close(accepted);
     }
     removeTempDir(dir, "SingletonSocket");
-    CHECK(ok);
     // The companion must identify the peer by credentials, never by name.
-    CHECK(cred.pid == ::getpid());
-    CHECK(cred.pid > 1);
-    CHECK(cred.uid == ::getuid());
-    CHECK(cred.gid == ::getgid());
-    CHECK(unixSocketIsLive(path) == false);
+    CHECK(credentialsRead);
+    CHECK(credentials.pid == ::getpid());
+    CHECK(credentials.pid > 1);
+    CHECK(credentials.uid == ::getuid());
+    CHECK(credentials.gid == ::getgid());
+    CHECK(companion::lifecycle::unixSocketIsLive(QString::fromStdString(path)) == false);
     return true;
 #endif
 }
@@ -464,17 +283,17 @@ bool testOwnedProcessGroupShutdown()
     // Graceful first: SIGTERM only the leader, then poll the whole group
     // empty with a zero-signal probe, all bounded.
     CHECK(::kill(child, SIGTERM) == 0 || errno == ESRCH);
-    const bool drained = waitForProcessGroupExit(pgid, kProbeTimeoutMs);
+    const bool drained = companion::lifecycle::waitForProcessGroupExit(pgid, kProbeTimeoutMs);
     if (!drained) {
         ::killpg(pgid, SIGTERM);
-        if (!waitForProcessGroupExit(pgid, 2000)) {
+        if (!companion::lifecycle::waitForProcessGroupExit(pgid, 2000)) {
             ::killpg(pgid, SIGKILL);
-            waitForProcessGroupExit(pgid, 2000);
+            companion::lifecycle::waitForProcessGroupExit(pgid, 2000);
         }
     }
     int status = 0;
     ::waitpid(child, &status, 0);
-    CHECK(groupExited(pgid));
+    CHECK(companion::lifecycle::groupExited(pgid));
     // Our own group was never signaled.
     CHECK(::kill(self, 0) == 0);
     CHECK(::getpgrp() == selfPgid);
@@ -484,12 +303,18 @@ bool testOwnedProcessGroupShutdown()
 
 bool testShowQuitDecision()
 {
-    CHECK(showAction(false, true) == "startDetached");
-    CHECK(quitAction(false, true) == "sigterm_peer");
-    CHECK(showAction(true, true) == "startDetached");
-    CHECK(quitAction(true, true) == "terminateChildGroup");
-    CHECK(showAction(false, false) == "startChild");
-    CHECK(quitAction(false, false) == "companion_only");
+    CHECK(companion::lifecycle::showAction(false, true)
+          == companion::lifecycle::ShowAction::StartDetached);
+    CHECK(companion::lifecycle::quitAction(false, true)
+          == companion::lifecycle::QuitAction::SignalPeer);
+    CHECK(companion::lifecycle::showAction(true, true)
+          == companion::lifecycle::ShowAction::StartDetached);
+    CHECK(companion::lifecycle::quitAction(true, true)
+          == companion::lifecycle::QuitAction::TerminateChildGroup);
+    CHECK(companion::lifecycle::showAction(false, false)
+          == companion::lifecycle::ShowAction::StartChild);
+    CHECK(companion::lifecycle::quitAction(false, false)
+          == companion::lifecycle::QuitAction::CompanionOnly);
     return true;
 }
 
@@ -527,7 +352,7 @@ bool testColdStartForward()
     const long long start = nowMs();
     bool ready = false;
     while (nowMs() - start < kProbeTimeoutMs) {
-        if (unixSocketIsLive(path)) {
+        if (companion::lifecycle::unixSocketIsLive(QString::fromStdString(path))) {
             ready = true;
             break;
         }
@@ -543,7 +368,7 @@ bool testColdStartForward()
     const long long missStart = nowMs();
     bool missing = false;
     while (nowMs() - missStart < 300) {
-        if (unixSocketIsLive(path)) {
+        if (companion::lifecycle::unixSocketIsLive(QString::fromStdString(path))) {
             missing = true;
             break;
         }
@@ -577,6 +402,7 @@ const std::vector<Case> &allCases()
 
 int main(int argc, char **argv)
 {
+    QCoreApplication app(argc, argv);
     // Outer fail-closed bound: never hang the CTest layer.
     ::alarm(120);
     std::string only;

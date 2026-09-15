@@ -208,6 +208,22 @@ def sample_modern_asar(tool, extra=None):
     return tool.write_asar(files)
 
 
+def sample_future_structural_asar(tool, extra=None):
+    """Represent a reviewed-but-not-yet-pinned minifier rename."""
+    files = {
+        "dist/electron-main/main-core.cjs": MODERN_CORE_UPSTREAM.encode("utf-8"),
+        "dist/electron-main/main-app.cjs": MODERN_RELAUNCH_CONTEXT_UPSTREAM.encode(
+            "utf-8"
+        ),
+        "dist/renderer/assets/index-B7CuLxVI.js": MODERN_LINUX_CONTROLS.replace(
+            "if(o)return null", "if(q)return null"
+        ).encode("utf-8"),
+    }
+    if extra:
+        files.update(extra)
+    return tool.write_asar(files)
+
+
 class NativeFrameTransformTests(unittest.TestCase):
     def setUp(self):
         self.tool = load_tool()
@@ -583,7 +599,11 @@ process.stdout.write("relaunch=exit close=!quitting:hide\n");
 
     def test_0510_minifier_renamed_shapes_are_patched(self):
         blob = sample_modern_asar(self.tool)
-        patched = self.tool.apply_native_frame_patches(blob)
+        patched, applied = self.tool._apply_native_frame_rules(blob)
+        self.assertFalse(
+            [entry for entry in applied if entry[3]],
+            "the pinned 0.51.0 fixture must use exact anchors, not fallback",
+        )
         core = self.tool.member_content(
             patched, "dist/electron-main/main-core.cjs"
         )
@@ -626,6 +646,19 @@ process.stdout.write("relaunch=exit close=!quitting:hide\n");
         self.assertGreater(data_offset, 0)
 
     def test_structural_fallback_rejects_ambiguity_and_near_misses(self):
+        future = sample_future_structural_asar(self.tool)
+        with self.assertRaisesRegex(
+            self.tool.TransformError, "structural fallback disabled"
+        ):
+            self.tool.apply_native_frame_patches(future)
+        patched = self.tool.apply_native_frame_patches(
+            future, allow_structural_fallback=True
+        )
+        renderer = self.tool.member_content(
+            patched, "dist/renderer/assets/index-B7CuLxVI.js"
+        )
+        self.assertIn(b"if(1)return null", renderer)
+
         for decoy_path in (
             "dist/renderer/assets/index-copy.js",
             "dist/renderer/assets/index-AAAAAAAA.js",
@@ -633,7 +666,10 @@ process.stdout.write("relaunch=exit close=!quitting:hide\n");
             with self.subTest(decoy_path=decoy_path):
                 ambiguous = sample_modern_asar(
                     self.tool,
-                    extra={decoy_path: MODERN_LINUX_CONTROLS.encode("utf-8")},
+                    extra={
+                        "dist/renderer/assets/index-B7CuLxVI.js": b"controls moved",
+                        decoy_path: MODERN_LINUX_CONTROLS.encode("utf-8"),
+                    },
                 )
                 with self.assertRaises(self.tool.TransformError):
                     self.tool.apply_native_frame_patches(ambiguous)
@@ -666,6 +702,31 @@ process.stdout.write("relaunch=exit close=!quitting:hide\n");
         blob = sample_modern_asar(
             self.tool,
             extra={decoy_path: self.tool.IN_CONTENT_CONTROLS_FIND},
+        )
+        patched = self.tool.apply_native_frame_patches(blob)
+        self.assertIn(
+            b"if(1)return null;let C,A,E,R,N;if(e[15]!==r)",
+            self.tool.member_content(
+                patched, "dist/renderer/assets/index-B7CuLxVI.js"
+            ),
+        )
+        self.assertEqual(
+            self.tool.member_content(patched, decoy_path),
+            self.tool.IN_CONTENT_CONTROLS_FIND,
+        )
+
+    def test_renderer_structural_decoy_is_not_the_intended_member(self):
+        # A single structural-looking anchor in an unrelated asset must not
+        # satisfy the controls rule when the intended index member has no
+        # candidate. The old path-prefix-only rule accepted this archive.
+        blob = sample_modern_asar(
+            self.tool,
+            extra={
+                "dist/renderer/assets/index-B7CuLxVI.js": b"controls moved",
+                "dist/renderer/assets/unrelated.js": MODERN_LINUX_CONTROLS.encode(
+                    "utf-8"
+                ),
+            },
         )
         with self.assertRaises(self.tool.TransformError):
             self.tool.apply_native_frame_patches(blob)
@@ -715,6 +776,30 @@ process.stdout.write("relaunch=exit close=!quitting:hide\n");
         with redirect_stderr(stderr):
             self.assertEqual(self.tool.main([]), 1)
         self.assertIn("usage:", stderr.getvalue())
+
+    def test_cli_requires_explicit_structural_fallback_and_audits_it(self):
+        blob = sample_future_structural_asar(self.tool)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "app.asar")
+            with open(path, "wb") as handle:
+                handle.write(blob)
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                self.assertEqual(self.tool.main([path]), 1)
+            with open(path, "rb") as handle:
+                self.assertEqual(handle.read(), blob)
+            self.assertIn("--allow-structural-fallback", stderr.getvalue())
+            self.assertIn("structural fallback", stderr.getvalue())
+
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                self.assertEqual(
+                    self.tool.main(["--allow-structural-fallback", path]), 0
+                )
+            self.assertIn("structural fallback:", stderr.getvalue())
+            with open(path, "rb") as handle:
+                patched = handle.read()
+        self.assertNotEqual(patched, blob)
 
     def test_manifest_keeps_helper_and_wrapper_forwarding(self):
         runner = load_runner_tests()

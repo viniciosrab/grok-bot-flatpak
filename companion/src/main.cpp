@@ -37,16 +37,12 @@
 #include <QStringList>
 #include <QTimer>
 #include <KStatusNotifierItem>
+#include "lifecycle_helpers.h"
 #include <sys/types.h>
 
 #ifdef Q_OS_UNIX
 #include <cerrno>
-#include <fcntl.h>
-#include <poll.h>
 #include <signal.h>
-#include <string.h>
-#include <sys/socket.h>
-#include <sys/un.h>
 #include <unistd.h>
 #endif
 
@@ -60,14 +56,20 @@ constexpr char kElectronUserDataDirName[] = "Grok Bot";
 constexpr char kElectronSingletonSocketName[] = "SingletonSocket";
 constexpr int kColdProtocolSocketPollMs = 50;
 constexpr int kColdProtocolReadyTimeoutMs = 15000;
-constexpr int kUnixSocketConnectTimeoutMs = 50;
 // Tray Quit drains Electron gracefully first: vendor `before-quit` cleanup
 // shuts down the detached local-exec daemon (SIGTERM, 4s wait, SIGKILL),
 // so the companion signals only the tracked leader and waits for the whole
 // group to exit before forcing. Every wait stays bounded.
 constexpr int kGracefulQuitTimeoutMs = 8000;
 constexpr int kForceShutdownTimeoutMs = 2000;
-constexpr int kGroupPollSliceMs = 100;
+
+using companion::lifecycle::groupExited;
+using companion::lifecycle::isProtocolUrl;
+using companion::lifecycle::linuxPeerPid;
+using companion::lifecycle::protocolUrlsFrom;
+using companion::lifecycle::unixSocketIsLive;
+using companion::lifecycle::waitForProcessGroupExit;
+using companion::lifecycle::kGroupPollSliceMs;
 
 QString electronSingletonSocketPath()
 {
@@ -109,149 +111,6 @@ QString liveElectronSocketPath()
     return QString();
 }
 
-int connectUnixSocket(const QString &socketPath)
-{
-#ifdef Q_OS_UNIX
-    // Connect only: callers must close the fd. Do not write protocol bytes.
-    const QByteArray encoded = QFile::encodeName(socketPath);
-    sockaddr_un addr{};
-    if (encoded.isEmpty() || static_cast<size_t>(encoded.size()) >= sizeof(addr.sun_path)) {
-        return -1;
-    }
-
-#ifdef SOCK_NONBLOCK
-    const int fd = ::socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0);
-#else
-    const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
-#endif
-    if (fd < 0) {
-        return -1;
-    }
-#ifndef SOCK_NONBLOCK
-    const int flags = ::fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || ::fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
-        ::close(fd);
-        return -1;
-    }
-#endif
-
-    addr.sun_family = AF_UNIX;
-    ::memcpy(addr.sun_path, encoded.constData(), static_cast<size_t>(encoded.size()));
-
-    QElapsedTimer clock;
-    clock.start();
-    for (;;) {
-        if (::connect(fd, reinterpret_cast<sockaddr *>(&addr), sizeof(addr)) == 0) {
-            return fd;
-        }
-        const int connectErr = errno;
-        if (connectErr == EINTR) {
-            if (clock.hasExpired(kUnixSocketConnectTimeoutMs)) {
-                ::close(fd);
-                return -1;
-            }
-            continue;
-        }
-        if (connectErr == EINPROGRESS || connectErr == EALREADY) {
-            for (;;) {
-                const qint64 remaining = kUnixSocketConnectTimeoutMs - clock.elapsed();
-                if (remaining <= 0) {
-                    ::close(fd);
-                    return -1;
-                }
-                pollfd ready{};
-                ready.fd = fd;
-                ready.events = POLLOUT;
-                const int pollRc = ::poll(&ready, 1, static_cast<int>(remaining));
-                if (pollRc < 0) {
-                    if (errno == EINTR) {
-                        continue;
-                    }
-                    ::close(fd);
-                    return -1;
-                }
-                if (pollRc == 0) {
-                    ::close(fd);
-                    return -1;
-                }
-                int soError = 0;
-                socklen_t soLen = sizeof(soError);
-                if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &soError, &soLen) != 0
-                    || soError != 0) {
-                    ::close(fd);
-                    return -1;
-                }
-                return fd;
-            }
-        }
-        if (connectErr == EAGAIN || connectErr == EWOULDBLOCK) {
-            const qint64 remaining = kUnixSocketConnectTimeoutMs - clock.elapsed();
-            if (remaining <= 0) {
-                ::close(fd);
-                return -1;
-            }
-            pollfd waiter{};
-            waiter.fd = -1;
-            const int waitRc = ::poll(&waiter, 1, static_cast<int>(remaining));
-            if (waitRc < 0 && errno != EINTR) {
-                ::close(fd);
-                return -1;
-            }
-            if (clock.hasExpired(kUnixSocketConnectTimeoutMs)) {
-                ::close(fd);
-                return -1;
-            }
-            continue;
-        }
-        ::close(fd);
-        return -1;
-    }
-#else
-    Q_UNUSED(socketPath);
-    return -1;
-#endif
-}
-
-bool unixSocketIsLive(const QString &socketPath)
-{
-    const int fd = connectUnixSocket(socketPath);
-    if (fd < 0) {
-        return false;
-    }
-#ifdef Q_OS_UNIX
-    ::close(fd);
-#endif
-    return true;
-}
-
-pid_t linuxPeerPid(const QString &socketPath)
-{
-#if defined(Q_OS_UNIX) && defined(__linux__)
-#ifndef SO_PEERCRED
-#define SO_PEERCRED 17
-#endif
-    const int fd = connectUnixSocket(socketPath);
-    if (fd < 0) {
-        return 0;
-    }
-    struct {
-        pid_t pid;
-        uid_t uid;
-        gid_t gid;
-    } cred{};
-    socklen_t len = sizeof(cred);
-    const int rc = ::getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len);
-    ::close(fd);
-    if (rc != 0 || cred.pid <= 1) {
-        return 0;
-    }
-    return cred.pid;
-#else
-    Q_UNUSED(socketPath);
-    return 0;
-#endif
-}
-
 bool electronSingleInstanceReady()
 {
     const QString target = liveElectronSocketPath();
@@ -262,23 +121,6 @@ bool watcherAvailable()
 {
     QDBusConnectionInterface *bus = QDBusConnection::sessionBus().interface();
     return bus != nullptr && bus->isServiceRegistered(QString::fromLatin1(kWatcherService));
-}
-
-bool isProtocolUrl(const QString &arg)
-{
-    return arg.startsWith(QLatin1String("grokbot:"))
-        || arg.startsWith(QLatin1String("sand:"));
-}
-
-QStringList protocolUrlsFrom(const QStringList &args)
-{
-    QStringList urls;
-    for (int i = 1; i < args.size(); ++i) {
-        if (isProtocolUrl(args.at(i))) {
-            urls.append(args.at(i));
-        }
-    }
-    return urls;
 }
 
 QString resolveElectronCommand(const QApplication &app)
@@ -355,7 +197,11 @@ private slots:
         // A hardware-acceleration relaunch leaves m_child NotRunning while
         // the new Electron singleton is still live. Treat that socket as the
         // running instance so Show focuses instead of spawning a tracked child.
-        if (m_child->state() != QProcess::NotRunning || electronSingleInstanceReady()) {
+        const bool childRunning = m_child->state() != QProcess::NotRunning;
+        const auto action = companion::lifecycle::showAction(
+            childRunning,
+            !childRunning && electronSingleInstanceReady());
+        if (action == companion::lifecycle::ShowAction::StartDetached) {
             // Second exec: Electron single-instance focuses the window.
             if (!QProcess::startDetached(m_electronCommand, {})) {
                 qWarning("grok-bot-companion: failed to reveal the running instance: %s", qPrintable(m_electronCommand));
@@ -367,9 +213,13 @@ private slots:
 
     void quitRequested()
     {
-        if (m_child->state() != QProcess::NotRunning) {
+        const bool childRunning = m_child->state() != QProcess::NotRunning;
+        const auto action = companion::lifecycle::quitAction(
+            childRunning,
+            !childRunning && electronSingleInstanceReady());
+        if (action == companion::lifecycle::QuitAction::TerminateChildGroup) {
             terminateChildGroup();
-        } else {
+        } else if (action == companion::lifecycle::QuitAction::SignalPeer) {
             terminateUntrackedElectron();
         }
         qApp->quit();
@@ -430,34 +280,6 @@ private:
             m_child->setArguments({});
         }
         m_child->start();
-    }
-
-    // Zero-signal probe: true when no process remains in pgid. Signal
-    // zero delivers nothing and no executable name is ever matched;
-    // EPERM (exists, no permission) counts as alive.
-    bool groupExited(pid_t pgid)
-    {
-        errno = 0;
-        return ::killpg(pgid, 0) != 0 && errno == ESRCH;
-    }
-
-    // Polls until the group exits or the timeout expires. Safe for the
-    // forced fallback: by then the tracked leader is reaped or hung, so a
-    // zombie cannot fake a live group (reparented members belong to init).
-    bool waitForProcessGroupExit(pid_t pgid, int timeoutMs)
-    {
-        QElapsedTimer clock;
-        clock.start();
-        for (;;) {
-            if (groupExited(pgid)) {
-                return true;
-            }
-            if (clock.hasExpired(timeoutMs)) {
-                break;
-            }
-            ::usleep(static_cast<useconds_t>(kGroupPollSliceMs) * 1000U);
-        }
-        return groupExited(pgid);
     }
 
     // Asks only the tracked leader to quit gracefully so vendor before-quit
@@ -609,9 +431,9 @@ int main(int argc, char **argv)
     if (!instanceLock.tryLock()) {
         // Browser protocol handoff: forward grokbot:// or sand:// to the
         // already-running Electron instead of dropping the URL.
-        forwardProtocolUrls(resolveElectronCommand(app), protocolUrls);
+        const bool forwarded = forwardProtocolUrls(resolveElectronCommand(app), protocolUrls);
         qWarning("grok-bot-companion: another instance is already running");
-        return 0;
+        return !protocolUrls.isEmpty() && !forwarded ? 1 : 0;
     }
 
     // Unique KF6 bus identity: org.kde.StatusNotifierItem-<pid>-<n>.

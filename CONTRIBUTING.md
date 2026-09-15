@@ -71,6 +71,20 @@ flatpak-builder --force-clean --repo=repo build-dir io.github.viniciosrab.GrokBo
 
 ## Releases
 
+### Companion versioning
+
+The KDE tray companion uses an independent version in
+`companion/CMakeLists.txt`. It identifies changes to the companion's own
+integration, lifecycle, and build contract; it is not the upstream Grok Bot
+payload version and must not be synchronized with it automatically.
+
+Update the companion version when the companion implementation or its public
+packaging contract changes. Update the payload version only through the
+normal pinned-source process (`data/pins.yml`, the manifest, and metainfo as
+appropriate). A companion-only change must not rewrite the payload version or
+payload sources, and a new upstream payload version must not require a
+companion version change unless the companion itself changed.
+
 Ordinary pushes to `main` validate but never auto-publish, including docs-only changes. A genuinely new upstream version from the pin job traverses validate, dual-arch X3 proof, and publish automatically; same-version repins no-op. Same-version packaging republishes run only through a manual `publish` dispatch from `main` with the required `reason` input:
 
 ```bash
