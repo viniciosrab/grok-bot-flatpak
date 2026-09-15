@@ -96,7 +96,21 @@ def run_ctest_layer() -> tuple[bool, str]:
         if shutil.which(tool) is None:
             return False, f"required tool is missing from PATH: {tool}"
     with tempfile.TemporaryDirectory(prefix="grok-bot-ctest-") as build_dir:
-        configure = _run(["cmake", "-S", REPO_ROOT, "-B", build_dir], REPO_ROOT)
+        # The production companion target is part of the gate: configure
+        # with GROK_BOT_BUILD_COMPANION=ON so missing Qt6 Widgets/DBus,
+        # KF6StatusNotifierItem, or KF6WindowSystem fail closed here
+        # instead of silently skipping the companion.
+        configure = _run(
+            [
+                "cmake",
+                "-S",
+                REPO_ROOT,
+                "-B",
+                build_dir,
+                "-DGROK_BOT_BUILD_COMPANION=ON",
+            ],
+            REPO_ROOT,
+        )
         logs.append(configure.stdout)
         configure_ok = configure.returncode == 0
         build_ok = False
