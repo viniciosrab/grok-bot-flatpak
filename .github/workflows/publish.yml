@@ -84,7 +84,7 @@ jobs:
     steps:
       - name: Check out the chain commit (automatic path)
         if: ${{ github.event_name == 'workflow_run' }}
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 0
@@ -92,7 +92,7 @@ jobs:
 
       - name: Check out the dispatched main snapshot (manual path)
         if: ${{ github.event_name == 'workflow_dispatch' }}
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
@@ -255,7 +255,7 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - name: Check out the decided commit
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.decide.outputs.sha }}
 
@@ -280,7 +280,7 @@ jobs:
     runs-on: ubuntu-24.04-arm
     steps:
       - name: Check out the decided commit
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.decide.outputs.sha }}
 
@@ -311,7 +311,7 @@ jobs:
       name: github-pages
     steps:
       - name: Check out the decided commit
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.decide.outputs.sha }}
           fetch-depth: 0
@@ -537,7 +537,7 @@ jobs:
       name: github-pages
     steps:
       - name: Check out the repository with tags
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ needs.decide.outputs.sha }}
           fetch-depth: 0
