@@ -27,12 +27,16 @@ LINUX_NATIVE = LINUX_FRAMELESS.replace(
     '{frame:!0,titleBarStyle:"default"}',
 )
 LINUX_CONTROLS = (
-    'if(c==="darwin")return null;if(c==="win32"){return hidden}'
-    "if(o)return null;let C,T,E,R,M;if(e[15]!==r){drawButtons()}"
+    'if(c==="darwin")return null;if(c==="win32"){let W;'
+    'e[12]===Symbol.for("react.memo_cache_sentinel")?(W={display:"none"},'
+    'e[12]=W):W=e[12];let Y;return e[13]!==w?'
+    '(Y=f.jsx("div",{"aria-hidden":!0,className:"sand-window-controls",'
+    'ref:w,style:W}),e[13]=w,e[14]=Y):Y=e[14],Y}'
+    'if(o)return null;let C,A,E,R,N;if(e[15]!==r)'
 )
 LINUX_CONTROLS_HIDDEN = LINUX_CONTROLS.replace(
-    "if(o)return null;let C,T,E,R,M;if(e[15]!==r)",
-    "if(1)return null;let C,T,E,R,M;if(e[15]!==r)",
+    "if(o)return null;let C,A,E,R,N;if(e[15]!==r)",
+    "if(1)return null;let C,A,E,R,N;if(e[15]!==r)",
 )
 # Byte-exact vendor creation site from the packed main-process bundle:
 # the documented `autoHideMenuBar` option is inserted right after the
@@ -122,20 +126,24 @@ FULL_CORE_PATCHED = (
 )
 
 # Representative Sand 0.51.0 shapes observed in the downloaded x86_64
-# AppImage. The stable syntax is retained while ordinary minifier identifiers
-# differ from the legacy fixture above.
+# AppImage. These are captured byte-exact anchors from the pinned payload;
+# both architecture payloads contain the same bytes at these member paths.
 MODERN_LINUX_FRAMELESS = (
     'function rP(e){return e.isMac?{frame:!0,titleBarStyle:"hiddenInset",'
     'trafficLightPosition:YI}:e.isWindows?{frame:!1,titleBarStyle:"hidden",'
     'titleBarOverlay:tP(e.backgroundColor)}:{frame:!1,titleBarStyle:"default"}}'
 )
 MODERN_LINUX_CONTROLS = (
-    'if(c==="darwin")return null;if(c==="win32"){let W;return W}'
-    'if(o)return null;let C,A,E,R,N;if(e[15]!==r){drawButtons()}'
+    LINUX_CONTROLS
 )
 MODERN_WINDOW_CREATE_UPSTREAM = (
     'i=new is.BrowserWindow({...a.windowOptions,title:is.app.getName(),'
-    'webPreferences:{sandbox:!0}})'
+    'icon:pP({platform:process.platform,isPackaged:is.app.isPackaged,'
+    'resourcesPath:process.resourcesPath,devIconPath:t}),'
+    'backgroundColor:e,...rP({isMac:o,isWindows:process.platform==="win32",'
+    'backgroundColor:e}),webPreferences:{contextIsolation:!0,nodeIntegration:!1,'
+    'preload:vp.default.join(Sy,Tp({isPackaged:is.app.isPackaged,'
+    'devCapability:r})),sandbox:!0,webviewTag:!0}})'
 )
 MODERN_CLOSE_UPSTREAM = (
     's.on("closed",()=>{Dh.markRendererNotReady()});let c=AP({window:TP(s),'
@@ -159,7 +167,7 @@ MODERN_CORE_UPSTREAM = (
     + MODERN_ARM_UPSTREAM + MODERN_SECOND_INSTANCE_UPSTREAM + FOCUS_CHAIN
 )
 MODERN_RELAUNCH_CONTEXT_UPSTREAM = (
-    'hardwareAccelerationEnabledAtLaunch:SK,relaunchDesktop:()=>{let B='
+    'hardwareAccelerationEnabledAtLaunch:kjt,relaunchDesktop:()=>{let B='
     'ne.environment.restartExitCode;if(B!=null){zZ(B);return}'
     'me.app.relaunch(),me.app.quit()},getMachineId:()=>it()'
 )
@@ -185,7 +193,7 @@ def sample_asar(tool, extra=None):
     files = {
         "dist/electron-main/main-core.cjs": FULL_CORE_UPSTREAM.encode("utf-8"),
         "dist/electron-main/main-app.cjs": RELAUNCH_CONTEXT_UPSTREAM.encode("utf-8"),
-        "dist/renderer/assets/index-C57MhV1e.js": LINUX_CONTROLS.encode("utf-8"),
+        "dist/renderer/assets/index-B7CuLxVI.js": LINUX_CONTROLS.encode("utf-8"),
         "keep/other.cjs": UNRELATED.encode("utf-8"),
     }
     if extra:
@@ -248,7 +256,7 @@ class NativeFrameTransformTests(unittest.TestCase):
             patched, "dist/electron-main/main-core.cjs"
         ).decode("utf-8")
         renderer = self.tool.member_content(
-            patched, "dist/renderer/assets/index-C57MhV1e.js"
+            patched, "dist/renderer/assets/index-B7CuLxVI.js"
         ).decode("utf-8")
         other = self.tool.member_content(patched, "keep/other.cjs")
         self.assertEqual(
@@ -309,11 +317,37 @@ class NativeFrameTransformTests(unittest.TestCase):
                 variant = self.tool.write_asar(
                     {
                         "dist/electron-main/main-core.cjs": core_text.encode("utf-8"),
-                        "dist/renderer/assets/index-C57MhV1e.js": LINUX_CONTROLS.encode("utf-8"),
+                        "dist/renderer/assets/index-B7CuLxVI.js": LINUX_CONTROLS.encode("utf-8"),
                     }
                 )
                 with self.assertRaises(self.tool.TransformError):
                     self.tool.apply_native_frame_patches(variant)
+
+    def test_modern_menu_patch_preserves_complete_browser_window_options(self):
+        blob = sample_modern_asar(self.tool)
+        patched = self.tool.apply_native_frame_patches(blob)
+        core = self.tool.member_content(
+            patched, "dist/electron-main/main-core.cjs"
+        ).decode("utf-8")
+        expected = MODERN_WINDOW_CREATE_UPSTREAM.replace(
+            "{...a.windowOptions,",
+            "{...a.windowOptions,autoHideMenuBar:!0,",
+            1,
+        )
+        self.assertIn(expected, core)
+        self.assertEqual(core.count(expected), 1)
+        self.assertNotIn(MODERN_WINDOW_CREATE_UPSTREAM, core)
+        for option in (
+            'icon:pP({platform:process.platform,isPackaged:is.app.isPackaged,',
+            "backgroundColor:e",
+            "contextIsolation:!0",
+            "nodeIntegration:!1",
+            "preload:vp.default.join(Sy,Tp({isPackaged:is.app.isPackaged,devCapability:r}))",
+            "webviewTag:!0",
+        ):
+            with self.subTest(option=option):
+                self.assertIn(option, expected)
+                self.assertIn(option, core)
 
     def test_sigterm_reaches_graceful_quit_cleanup(self):
         core_text = FULL_CORE_UPSTREAM
@@ -323,7 +357,7 @@ class NativeFrameTransformTests(unittest.TestCase):
                 "dist/electron-main/main-app.cjs": RELAUNCH_CONTEXT_UPSTREAM.encode(
                     "utf-8"
                 ),
-                "dist/renderer/assets/index-C57MhV1e.js": LINUX_CONTROLS.encode("utf-8"),
+                "dist/renderer/assets/index-B7CuLxVI.js": LINUX_CONTROLS.encode("utf-8"),
             }
         )
         patched = self.tool.apply_native_frame_patches(blob)
@@ -349,7 +383,7 @@ class NativeFrameTransformTests(unittest.TestCase):
                 bad = self.tool.write_asar(
                     {
                         "dist/electron-main/main-core.cjs": variant.encode("utf-8"),
-                        "dist/renderer/assets/index-C57MhV1e.js": LINUX_CONTROLS.encode("utf-8"),
+                        "dist/renderer/assets/index-B7CuLxVI.js": LINUX_CONTROLS.encode("utf-8"),
                     }
                 )
                 with self.assertRaises(self.tool.TransformError):
@@ -413,7 +447,7 @@ class NativeFrameTransformTests(unittest.TestCase):
                 "dist/electron-main/main-app.cjs": RELAUNCH_CONTEXT_UPSTREAM.encode(
                     "utf-8"
                 ),
-                "dist/renderer/assets/index-C57MhV1e.js": LINUX_CONTROLS.encode(
+                "dist/renderer/assets/index-B7CuLxVI.js": LINUX_CONTROLS.encode(
                     "utf-8"
                 ),
             }
@@ -422,19 +456,21 @@ class NativeFrameTransformTests(unittest.TestCase):
             self.tool.apply_native_frame_patches(missing_close)
 
     def test_relaunch_bytes_grounded_if_asar_present(self):
-        candidates = [
-            os.path.join(
-                REPO_ROOT, "build-dir", "files", "grok-bot", "resources", "app.asar"
-            ),
-            os.environ.get("GROK_BOT_APP_ASAR", ""),
-        ]
-        present = [path for path in candidates if path and os.path.isfile(path)]
+        configured = os.environ.get("GROK_BOT_APP_ASAR", "")
+        if not configured:
+            self.skipTest(
+                "GROK_BOT_APP_ASAR is not set; skipping optional real-ASAR relaunch probe"
+            )
+        present = [path for path in configured.split(os.pathsep) if path]
         if not present:
-            return
+            self.skipTest(
+                "GROK_BOT_APP_ASAR contains no paths; skipping optional real-ASAR relaunch probe"
+            )
         find = self.tool.RELAUNCH_QUIT_FIND
         replace = self.tool.RELAUNCH_QUIT_REPLACE
         for path in present:
             with self.subTest(path=path):
+                self.assertTrue(os.path.isfile(path), path)
                 with open(path, "rb") as handle:
                     blob = handle.read()
                 find_count = blob.count(find)
@@ -445,6 +481,32 @@ class NativeFrameTransformTests(unittest.TestCase):
                 self.assertEqual(find_count + replace_count, 1, path)
                 self.assertLessEqual(find_count, 1, path)
                 self.assertLessEqual(replace_count, 1, path)
+
+    def test_real_asar_uses_exact_anchors_without_fallback_if_available(self):
+        configured = os.environ.get("GROK_BOT_APP_ASAR", "")
+        if not configured:
+            self.skipTest(
+                "GROK_BOT_APP_ASAR is not set; skipping optional real-ASAR exact-anchor probe"
+            )
+        paths = [path for path in configured.split(os.pathsep) if path]
+        if not paths:
+            self.skipTest(
+                "GROK_BOT_APP_ASAR contains no paths; skipping optional real-ASAR exact-anchor probe"
+            )
+        for path in paths:
+            with self.subTest(path=path):
+                self.assertTrue(os.path.isfile(path), path)
+                with open(path, "rb") as handle:
+                    original = handle.read()
+                patched, applied = self.tool._apply_native_frame_rules(original)
+                self.assertFalse(
+                    [entry for entry in applied if entry[3]],
+                    "real pinned ASAR must use exact anchors in normal mode",
+                )
+                self.assertEqual(
+                    patched,
+                    self.tool.apply_native_frame_patches(original),
+                )
 
     def test_relaunch_vs_hide_node_probe(self):
         node = shutil.which("node")
@@ -520,7 +582,7 @@ process.stdout.write("relaunch=exit close=!quitting:hide\n");
                 blob = self.tool.write_asar(
                     {
                         "dist/electron-main/main-core.cjs": core_text.encode("utf-8"),
-                        "dist/renderer/assets/index-C57MhV1e.js": LINUX_CONTROLS.encode("utf-8"),
+                        "dist/renderer/assets/index-B7CuLxVI.js": LINUX_CONTROLS.encode("utf-8"),
                     }
                 )
                 with self.assertRaises(self.tool.TransformError):
@@ -561,7 +623,7 @@ process.stdout.write("relaunch=exit close=!quitting:hide\n");
                 "dist/electron-main/main-core.cjs": FULL_CORE_UPSTREAM.replace(
                     SECOND_INSTANCE_UPSTREAM, ""
                 ).encode("utf-8"),
-                "dist/renderer/assets/index-C57MhV1e.js": LINUX_CONTROLS.encode("utf-8"),
+                "dist/renderer/assets/index-B7CuLxVI.js": LINUX_CONTROLS.encode("utf-8"),
             }
         )
         with self.assertRaises(self.tool.TransformError):
@@ -572,7 +634,7 @@ process.stdout.write("relaunch=exit close=!quitting:hide\n");
                     SECOND_INSTANCE_UPSTREAM,
                     SECOND_INSTANCE_UPSTREAM + SECOND_INSTANCE_UPSTREAM,
                 ).encode("utf-8"),
-                "dist/renderer/assets/index-C57MhV1e.js": LINUX_CONTROLS.encode("utf-8"),
+                "dist/renderer/assets/index-B7CuLxVI.js": LINUX_CONTROLS.encode("utf-8"),
             }
         )
         with self.assertRaises(self.tool.TransformError):
@@ -744,6 +806,21 @@ process.stdout.write("relaunch=exit close=!quitting:hide\n");
         with self.assertRaises(self.tool.TransformError):
             self.tool.apply_native_frame_patches(blob)
 
+    def test_exact_anchor_in_path_suffix_decoy_fails_closed(self):
+        blob = sample_modern_asar(
+            self.tool,
+            extra={
+                "dist/electron-main/main-core.cjs": MODERN_CORE_UPSTREAM.replace(
+                    MODERN_LINUX_FRAMELESS, ""
+                ).encode("utf-8"),
+                "dist/electron-main/main-core.cjs.copy": (
+                    self.tool.NATIVE_FRAME_FIND
+                ),
+            },
+        )
+        with self.assertRaises(self.tool.TransformError):
+            self.tool.apply_native_frame_patches(blob)
+
     def test_relaunch_pair_outside_target_function_fails_closed(self):
         outside_target = (
             'relaunchDesktop:()=>{let B=ne.environment.restartExitCode;return},'
@@ -883,7 +960,7 @@ process.stdout.write("relaunch=exit close=!quitting:hide\n");
                 "dist/electron-main/main-app.cjs": RELAUNCH_CONTEXT_UPSTREAM.encode(
                     "utf-8"
                 ),
-                "dist/renderer/assets/index-C57MhV1e.js": LINUX_CONTROLS.encode("utf-8"),
+                "dist/renderer/assets/index-B7CuLxVI.js": LINUX_CONTROLS.encode("utf-8"),
             },
             block_size=block_size,
         )
@@ -895,7 +972,7 @@ process.stdout.write("relaunch=exit close=!quitting:hide\n");
                 "dist/electron-main/main-core.cjs",
                 FULL_CORE_PATCHED.encode("utf-8"),
             ),
-            ("dist/renderer/assets/index-C57MhV1e.js", LINUX_CONTROLS_HIDDEN.encode("utf-8")),
+            ("dist/renderer/assets/index-B7CuLxVI.js", LINUX_CONTROLS_HIDDEN.encode("utf-8")),
         ):
             data = self.tool.member_content(patched, path)
             integrity = self.tool.member_meta(patched, path)["integrity"]
@@ -970,7 +1047,7 @@ process.stdout.write("relaunch=exit close=!quitting:hide\n");
         missing = self.tool.write_asar(
             {
                 "dist/electron-main/main-core.cjs": LINUX_FRAMELESS.encode("utf-8"),
-                "dist/renderer/assets/index-C57MhV1e.js": LINUX_CONTROLS.encode("utf-8"),
+                "dist/renderer/assets/index-B7CuLxVI.js": LINUX_CONTROLS.encode("utf-8"),
             },
             with_integrity=False,
         )

@@ -137,11 +137,16 @@ SIGTERM_QUIT_BRIDGE_REPLACE = (
 # before-quit daemon drain.
 RELAUNCH_QUIT_FIND = b"ye.app.relaunch(),ye.app.quit()"
 RELAUNCH_QUIT_REPLACE = b"ye.app.relaunch(),ye.app.exit()"
-# Exact anchors for the currently pinned 0.51.0 payload. These are kept
-# separate from the legacy anchors above because the minifier renamed locals
-# without changing the verified surrounding shapes.
+# Exact anchors for the currently pinned 0.51.0 payload. These are captured
+# from the packed x86_64 and aarch64 app.asar members. The archive bytes differ
+# elsewhere by architecture, but these approved member-local anchors are
+# identical; membership remains exact and fail-closed.
 CURRENT_CONTROLS_FIND = (
-    b'if(c==="darwin")return null;if(c==="win32"){let W;return W}'
+    b'if(c==="darwin")return null;if(c==="win32"){let W;'
+    b'e[12]===Symbol.for("react.memo_cache_sentinel")?(W={display:"none"},'
+    b'e[12]=W):W=e[12];let Y;return e[13]!==w?'
+    b'(Y=f.jsx("div",{"aria-hidden":!0,className:"sand-window-controls",'
+    b'ref:w,style:W}),e[13]=w,e[14]=Y):Y=e[14],Y}'
     b'if(o)return null;let C,A,E,R,N;if(e[15]!==r)'
 )
 CURRENT_CONTROLS_REPLACE = CURRENT_CONTROLS_FIND.replace(
@@ -166,11 +171,19 @@ CURRENT_SECOND_INSTANCE_REPLACE = (
 )
 CURRENT_MENU_HIDE_FIND = (
     b'i=new is.BrowserWindow({...a.windowOptions,title:is.app.getName(),'
-    b'webPreferences:{sandbox:!0}})'
+    b'icon:pP({platform:process.platform,isPackaged:is.app.isPackaged,'
+    b'resourcesPath:process.resourcesPath,devIconPath:t}),backgroundColor:e,'
+    b'...rP({isMac:o,isWindows:process.platform==="win32",backgroundColor:e}),'
+    b'webPreferences:{contextIsolation:!0,nodeIntegration:!1,preload:'
+    b'vp.default.join(Sy,Tp({isPackaged:is.app.isPackaged,devCapability:r})),'
+    b'sandbox:!0,webviewTag:!0}})'
 )
 CURRENT_MENU_HIDE_REPLACE = (
-    b'i=new is.BrowserWindow({...a.windowOptions,autoHideMenuBar:!0,'
-    b'title:is.app.getName(),webPreferences:{sandbox:!0}})'
+    CURRENT_MENU_HIDE_FIND.replace(
+        b"{...a.windowOptions,",
+        b"{...a.windowOptions,autoHideMenuBar:!0,",
+        1,
+    )
 )
 CURRENT_SIGTERM_FIND = (
     b'var su=!he.app.isPackaged||he.app.requestSingleInstanceLock();'
@@ -181,7 +194,7 @@ CURRENT_SIGTERM_REPLACE = (
     b'su||he.app.quit();process.on("SIGTERM",()=>{he.app.quit()});'
 )
 CURRENT_RELAUNCH_FIND = (
-    b"hardwareAccelerationEnabledAtLaunch:SK,relaunchDesktop:()=>{let B="
+    b"hardwareAccelerationEnabledAtLaunch:kjt,relaunchDesktop:()=>{let B="
     b"ne.environment.restartExitCode;if(B!=null){zZ(B);return}"
     b"me.app.relaunch(),me.app.quit()},getMachineId:()=>it()"
 )
@@ -239,7 +252,7 @@ class NativePatchRule:
         "replace",
         "structural",
         "extension",
-        "path_prefix",
+        "member_path",
         "structural_path",
         "exact_paths",
         "exact_pairs",
@@ -252,7 +265,7 @@ class NativePatchRule:
         replace: bytes,
         structural: StructuralPatch | None = None,
         extension: bool = False,
-        path_prefix: str | None = None,
+        member_path: str | None = None,
         structural_path: str | None = None,
         exact_paths: tuple[str, ...] = (),
         exact_pairs: tuple[tuple[bytes, bytes], ...] = (),
@@ -262,7 +275,7 @@ class NativePatchRule:
         self.replace = replace
         self.structural = structural
         self.extension = extension
-        self.path_prefix = path_prefix
+        self.member_path = member_path
         self.structural_path = structural_path
         self.exact_paths = exact_paths
         self.exact_pairs = ((find, replace),) + exact_pairs
@@ -470,18 +483,17 @@ NATIVE_PATCH_RULES = (
         "native Linux frame",
         NATIVE_FRAME_FIND,
         NATIVE_FRAME_REPLACE,
-        path_prefix="dist/electron-main/main-core.cjs",
+        member_path="dist/electron-main/main-core.cjs",
     ),
     NativePatchRule(
         "Linux in-content controls",
-        IN_CONTENT_CONTROLS_FIND,
-        IN_CONTENT_CONTROLS_REPLACE,
+        CURRENT_CONTROLS_FIND,
+        CURRENT_CONTROLS_REPLACE,
         _CONTROLS_STRUCTURAL,
         exact_paths=(
-            "dist/renderer/assets/index-C57MhV1e.js",
             "dist/renderer/assets/index-B7CuLxVI.js",
         ),
-        exact_pairs=((CURRENT_CONTROLS_FIND, CURRENT_CONTROLS_REPLACE),),
+        exact_pairs=(),
         structural_path="dist/renderer/assets/index-B7CuLxVI.js",
     ),
     NativePatchRule(
@@ -489,7 +501,7 @@ NATIVE_PATCH_RULES = (
         SECOND_INSTANCE_REVEAL_FIND,
         SECOND_INSTANCE_REVEAL_REPLACE,
         _SECOND_INSTANCE_STRUCTURAL,
-        path_prefix="dist/electron-main/main-core.cjs",
+        member_path="dist/electron-main/main-core.cjs",
         exact_pairs=((CURRENT_SECOND_INSTANCE_FIND, CURRENT_SECOND_INSTANCE_REPLACE),),
     ),
     NativePatchRule(
@@ -497,7 +509,7 @@ NATIVE_PATCH_RULES = (
         RELAUNCH_QUIT_FIND,
         RELAUNCH_QUIT_REPLACE,
         _RELAUNCH_STRUCTURAL,
-        path_prefix="dist/electron-main/main-app.cjs",
+        member_path="dist/electron-main/main-app.cjs",
         exact_pairs=((CURRENT_RELAUNCH_FIND, CURRENT_RELAUNCH_REPLACE),),
     ),
     NativePatchRule(
@@ -506,7 +518,7 @@ NATIVE_PATCH_RULES = (
         CLOSE_INTERCEPT_REPLACE,
         _CLOSE_STRUCTURAL,
         extension=True,
-        path_prefix="dist/electron-main/main-core.cjs",
+        member_path="dist/electron-main/main-core.cjs",
         exact_pairs=((CURRENT_CLOSE_FIND, CURRENT_CLOSE_REPLACE),),
     ),
     NativePatchRule(
@@ -515,7 +527,7 @@ NATIVE_PATCH_RULES = (
         QUIT_ARM_REPLACE,
         _QUIT_ARM_STRUCTURAL,
         extension=True,
-        path_prefix="dist/electron-main/main-core.cjs",
+        member_path="dist/electron-main/main-core.cjs",
     ),
     NativePatchRule(
         "BrowserWindow menu hiding",
@@ -523,7 +535,7 @@ NATIVE_PATCH_RULES = (
         MENU_HIDE_REPLACE,
         _MENU_HIDE_STRUCTURAL,
         extension=True,
-        path_prefix="dist/electron-main/main-core.cjs",
+        member_path="dist/electron-main/main-core.cjs",
         exact_pairs=((CURRENT_MENU_HIDE_FIND, CURRENT_MENU_HIDE_REPLACE),),
     ),
     NativePatchRule(
@@ -532,7 +544,7 @@ NATIVE_PATCH_RULES = (
         SIGTERM_QUIT_BRIDGE_REPLACE,
         _SIGTERM_STRUCTURAL,
         extension=True,
-        path_prefix="dist/electron-main/main-core.cjs",
+        member_path="dist/electron-main/main-core.cjs",
         exact_pairs=((CURRENT_SIGTERM_FIND, CURRENT_SIGTERM_REPLACE),),
     ),
 )
@@ -645,6 +657,20 @@ def _semantic_candidates(
     return semantic
 
 
+def _member_matches(rule: NativePatchRule, path: str) -> bool:
+    if rule.exact_paths:
+        return path in rule.exact_paths
+    if rule.member_path is None:
+        return True
+    return path == rule.member_path
+
+
+def _structural_member_matches(rule: NativePatchRule, path: str) -> bool:
+    if rule.structural_path is not None:
+        return path == rule.structural_path
+    return _member_matches(rule, path)
+
+
 def _apply_native_frame_rules(
     blob: bytes,
     *,
@@ -663,11 +689,7 @@ def _apply_native_frame_rules(
         exact_candidates: list[PatchCandidate] = [
             (path, match.start(), match.end(), None, replacement)
             for path, content in contents.items()
-            if (
-                path in rule.exact_paths
-                if rule.exact_paths
-                else rule.path_prefix is None or path.startswith(rule.path_prefix)
-            )
+            if _member_matches(rule, path)
             for find, replacement in rule.exact_pairs
             for match in re.finditer(re.escape(find), content)
         ]
@@ -676,14 +698,7 @@ def _apply_native_frame_rules(
             structural_candidates = [
                 (path, match.start(), match.end(), match, None)
                 for path, content in contents.items()
-                if (
-                    rule.structural_path is None
-                    and (rule.path_prefix is None or path.startswith(rule.path_prefix))
-                )
-                or (
-                    rule.structural_path is not None
-                    and path == rule.structural_path
-                )
+                if _structural_member_matches(rule, path)
                 for match in rule.structural.pattern.finditer(content)
             ]
 
