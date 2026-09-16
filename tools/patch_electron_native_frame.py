@@ -244,7 +244,7 @@ class StructuralPatch:
 
 
 class NativePatchRule:
-    """An exact pinned patch with an optional manual structural fallback."""
+    """An exact pinned patch with an optional structural fallback."""
 
     __slots__ = (
         "name",
@@ -254,8 +254,10 @@ class NativePatchRule:
         "extension",
         "member_path",
         "structural_path",
+        "structural_path_pattern",
         "exact_paths",
         "exact_pairs",
+        "structural_auto",
     )
 
     def __init__(
@@ -267,8 +269,10 @@ class NativePatchRule:
         extension: bool = False,
         member_path: str | None = None,
         structural_path: str | None = None,
+        structural_path_pattern: re.Pattern[str] | None = None,
         exact_paths: tuple[str, ...] = (),
         exact_pairs: tuple[tuple[bytes, bytes], ...] = (),
+        structural_auto: bool = False,
     ) -> None:
         self.name = name
         self.find = find
@@ -277,44 +281,101 @@ class NativePatchRule:
         self.extension = extension
         self.member_path = member_path
         self.structural_path = structural_path
+        self.structural_path_pattern = structural_path_pattern
         self.exact_paths = exact_paths
         self.exact_pairs = ((find, replace),) + exact_pairs
+        self.structural_auto = structural_auto
+
+
+# Renderer entry bundles are code-split per release (0.51.0 shipped
+# `index-<hash>.js`, 0.53.0 ships `index-u-<hash>.js` next to hundreds of
+# `chunk-*.js` splits). The controls component always lives in the single
+# entry bundle, never in a chunk, a stylesheet, or a `-copy` decoy.
+RENDERER_ENTRY_BUNDLE_RE = re.compile(r"^dist/renderer/assets/index-[^/]*\.js$")
 
 
 PatchCandidate = tuple[str, int, int, re.Match[bytes] | None, bytes | None]
 AppliedPatch = tuple[NativePatchRule, str, bytes, bool]
 
 
+def _balanced_braces(data: bytes) -> bool:
+    """Check brace balance while ignoring JS string literals."""
+    depth = 0
+    quote: int | None = None
+    escaped = False
+    index = 0
+    while index < len(data):
+        byte = data[index]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif byte == 92:  # backslash
+                escaped = True
+            elif byte == quote:
+                quote = None
+        elif byte in (34, 39, 96):  # ", ', `
+            quote = byte
+        elif byte == 123:  # {
+            depth += 1
+        elif byte == 125:  # }
+            depth -= 1
+            if depth < 0:
+                return False
+        index += 1
+    return quote is None and depth == 0
+
+
+def _controls_structural_replacement(match: re.Match[bytes]) -> bytes:
+    """Rewrite only the Linux hidden guard after the win32 controls block."""
+    full = match.group(0)
+    hidden = match.group("hidden")
+    win32 = match.group("win32")
+    if b"sand-window-controls" not in win32:
+        raise TransformError(
+            "structural patch Linux in-content controls missing invariant"
+        )
+    if not _balanced_braces(win32):
+        raise TransformError(
+            "structural patch Linux in-content controls unbalanced block"
+        )
+    win32_end = match.end("win32") - match.start(0)
+    prefix, suffix = full[:win32_end], full[win32_end:]
+    rewritten_suffix, count = re.subn(
+        rb"if\s*\(\s*" + re.escape(hidden) + rb"\s*\)\s*return\s+null",
+        b"if(1)return null",
+        suffix,
+        count=1,
+    )
+    if count != 1:
+        raise TransformError(
+            "structural patch Linux in-content controls produced no change"
+        )
+    return prefix + rewritten_suffix
+
+
 _CONTROLS_STRUCTURAL = StructuralPatch(
     "Linux in-content controls",
     re.compile(
-        rb'if\((?P<platform>'
+        rb"if\s*\(\s*(?P<platform>"
         + _MINIFIED_IDENTIFIER
-        + rb')==="darwin"\)return null;'
-        rb'if\((?P=platform)==="win32"\)\{[\s\S]{0,1600}?\}'
-        rb'if\((?P<hidden>'
+        + rb")\s*(?:===|==)\s*[\"']darwin[\"']\s*\)\s*return\s+null\s*;"
+        + rb"\s*if\s*\(\s*(?P=platform)\s*(?:===|==)\s*[\"']win32[\"']\s*\)\s*"
+        + rb"\{(?P<win32>[\s\S]{0,8000}?sand-window-controls[\s\S]{0,8000}?)\}"
+        + rb"\s*if\s*\(\s*(?P<hidden>"
         + _MINIFIED_IDENTIFIER
-        + rb')\)return null;let '
+        + rb")\s*\)\s*return\s+null\s*;"
+        + rb"\s*(?:var|let|const)\s+"
         + _MINIFIED_IDENTIFIER
-        + rb','
+        + rb"(?:\s*,\s*"
         + _MINIFIED_IDENTIFIER
-        + rb','
+        + rb")*\s*;"
+        + rb"\s*if\s*\(\s*(?P<state>"
         + _MINIFIED_IDENTIFIER
-        + rb','
+        + rb")\s*\[\s*\d+\s*\]\s*(?:!==|!=)\s*"
         + _MINIFIED_IDENTIFIER
-        + rb','
-        + _MINIFIED_IDENTIFIER
-        + rb';if\((?P<state>'
-        + _MINIFIED_IDENTIFIER
-        + rb')\[15\]!=='
-        + _MINIFIED_IDENTIFIER
-        + rb'\)'
+        + rb"\s*\)"
     ),
-    lambda match: match.group(0).replace(
-        b"if(" + match.group("hidden") + b")return null",
-        b"if(1)return null",
-        1,
-    ),
+    _controls_structural_replacement,
 )
 
 
@@ -420,6 +481,12 @@ _SECOND_INSTANCE_STRUCTURAL = StructuralPatch(
 
 _MENU_HIDE_STRUCTURAL = StructuralPatch(
     "BrowserWindow menu hiding",
+    # The prefix alone also matches unrelated utility windows, so the match
+    # additionally proves the main window through co-occurring behavioral
+    # invariants from the verified 0.51.0/0.53.0 spans: a title derived from
+    # the app name plus the secure webPreferences set. The zero-width
+    # lookaheads keep the match span on the prefix (no swallowing hazard)
+    # while tolerating identifier churn and option reordering.
     re.compile(
         rb'(?P<window>'
         + _MINIFIED_IDENTIFIER
@@ -428,6 +495,12 @@ _MENU_HIDE_STRUCTURAL = StructuralPatch(
         + rb')\.BrowserWindow\(\{\.\.\.(?P<options>'
         + _MINIFIED_IDENTIFIER
         + rb')\.windowOptions,'
+        + rb'(?=[\s\S]{0,2000}?title:)'
+        + rb'(?=[\s\S]{0,2000}?\.app\.getName\(\))'
+        + rb'(?=[\s\S]{0,2000}?backgroundColor)'
+        + rb'(?=[\s\S]{0,2000}?webPreferences:)'
+        + rb'(?=[\s\S]{0,2000}?sandbox:!0)'
+        + rb'(?=[\s\S]{0,2000}?webviewTag:!0)'
     ),
     lambda match: match.group(0) + b"autoHideMenuBar:!0,",
 )
@@ -494,7 +567,8 @@ NATIVE_PATCH_RULES = (
             "dist/renderer/assets/index-B7CuLxVI.js",
         ),
         exact_pairs=(),
-        structural_path="dist/renderer/assets/index-B7CuLxVI.js",
+        structural_path_pattern=RENDERER_ENTRY_BUNDLE_RE,
+        structural_auto=True,
     ),
     NativePatchRule(
         "second-instance reveal",
@@ -503,6 +577,7 @@ NATIVE_PATCH_RULES = (
         _SECOND_INSTANCE_STRUCTURAL,
         member_path="dist/electron-main/main-core.cjs",
         exact_pairs=((CURRENT_SECOND_INSTANCE_FIND, CURRENT_SECOND_INSTANCE_REPLACE),),
+        structural_auto=True,
     ),
     NativePatchRule(
         "hardware-acceleration relaunch",
@@ -511,6 +586,7 @@ NATIVE_PATCH_RULES = (
         _RELAUNCH_STRUCTURAL,
         member_path="dist/electron-main/main-app.cjs",
         exact_pairs=((CURRENT_RELAUNCH_FIND, CURRENT_RELAUNCH_REPLACE),),
+        structural_auto=True,
     ),
     NativePatchRule(
         "close-to-hide lifecycle",
@@ -520,6 +596,7 @@ NATIVE_PATCH_RULES = (
         extension=True,
         member_path="dist/electron-main/main-core.cjs",
         exact_pairs=((CURRENT_CLOSE_FIND, CURRENT_CLOSE_REPLACE),),
+        structural_auto=True,
     ),
     NativePatchRule(
         "window-all-closed quit arming",
@@ -537,6 +614,7 @@ NATIVE_PATCH_RULES = (
         extension=True,
         member_path="dist/electron-main/main-core.cjs",
         exact_pairs=((CURRENT_MENU_HIDE_FIND, CURRENT_MENU_HIDE_REPLACE),),
+        structural_auto=True,
     ),
     NativePatchRule(
         "single-instance graceful SIGTERM bridge",
@@ -546,6 +624,7 @@ NATIVE_PATCH_RULES = (
         extension=True,
         member_path="dist/electron-main/main-core.cjs",
         exact_pairs=((CURRENT_SIGTERM_FIND, CURRENT_SIGTERM_REPLACE),),
+        structural_auto=True,
     ),
 )
 
@@ -666,6 +745,8 @@ def _member_matches(rule: NativePatchRule, path: str) -> bool:
 
 
 def _structural_member_matches(rule: NativePatchRule, path: str) -> bool:
+    if rule.structural_path_pattern is not None:
+        return bool(rule.structural_path_pattern.match(path))
     if rule.structural_path is not None:
         return path == rule.structural_path
     return _member_matches(rule, path)
@@ -676,7 +757,13 @@ def _apply_native_frame_rules(
     *,
     allow_structural_fallback: bool = False,
 ) -> tuple[bytes, list[AppliedPatch]]:
-    """Apply exact pinned rules, or an explicitly enabled structural fallback."""
+    """Apply exact pinned rules, with automatic semantic matching.
+
+    Rules marked structural_auto tolerate minifier churn through a stable
+    path-scoped semantic matcher (the renderer controls rule follows the
+    single versioned entry bundle instead of a pinned hash filename).
+    Remaining structural rules stay explicitly enabled manual diagnostics.
+    """
     header, json_start, json_len, data_offset = read_asar(blob)
     contents = {
         path: _member_bytes(blob, meta, data_offset)
@@ -686,6 +773,17 @@ def _apply_native_frame_rules(
     applied: list[AppliedPatch] = []
 
     for rule in NATIVE_PATCH_RULES:
+        if rule.structural_path_pattern is not None:
+            scoped = sorted(
+                path
+                for path in contents
+                if rule.structural_path_pattern.match(path)
+            )
+            if len(scoped) != 1:
+                raise TransformError(
+                    "expected exactly one semantic ASAR entry bundle for %s, found %s"
+                    % (rule.name, scoped)
+                )
         exact_candidates: list[PatchCandidate] = [
             (path, match.start(), match.end(), None, replacement)
             for path, content in contents.items()
@@ -714,7 +812,11 @@ def _apply_native_frame_rules(
             )
 
         path, start, end, structural_match, exact_replacement = candidates[0]
-        if structural_match is not None and not allow_structural_fallback:
+        if (
+            structural_match is not None
+            and not allow_structural_fallback
+            and not rule.structural_auto
+        ):
             raise TransformError(
                 "structural fallback disabled for %s at %s; exact pinned anchors are required; "
                 "use --allow-structural-fallback only for manual diagnostics"
@@ -1055,8 +1157,9 @@ def apply_native_frame_patches(
 ) -> bytes:
     """Patch packed members and rebuild the archive fail-closed.
 
-    The currently pinned payload uses byte-exact anchors. Structural rules are
-    retained only for an explicit manual diagnostic invocation.
+    Rules marked structural_auto use a stable path-scoped semantic matcher
+    that tolerates minifier churn automatically. Any remaining structural
+    rule is retained only for an explicit manual diagnostic invocation.
     """
     result, _applied = _apply_native_frame_rules(
         blob, allow_structural_fallback=allow_structural_fallback
@@ -1126,7 +1229,7 @@ def write_asar(
 def patch_asar_file(
     path: str, *, allow_structural_fallback: bool = False
 ) -> list[str]:
-    """Patch one ASAR and require explicit approval for structural fallback."""
+    """Patch one ASAR and require explicit approval for manual fallbacks."""
     with open(path, "rb") as handle:
         original = handle.read()
     patched, applied = _apply_native_frame_rules(
@@ -1139,10 +1242,15 @@ def patch_asar_file(
         for rule, member_path, _replacement, used_structural_fallback in applied
         if used_structural_fallback
     ]
-    if fallbacks and not allow_structural_fallback:
+    manual_fallbacks = [
+        "%s in %s" % (rule.name, member_path)
+        for rule, member_path, _replacement, used_structural_fallback in applied
+        if used_structural_fallback and not rule.structural_auto
+    ]
+    if manual_fallbacks and not allow_structural_fallback:
         raise TransformError(
             "structural fallback requires explicit "
-            "--allow-structural-fallback: %s" % ", ".join(fallbacks)
+            "--allow-structural-fallback: %s" % ", ".join(manual_fallbacks)
         )
     _write_patched_asar(path, patched)
     return fallbacks
