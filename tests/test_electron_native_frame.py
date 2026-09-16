@@ -232,6 +232,90 @@ def sample_future_structural_asar(tool, extra=None):
     return tool.write_asar(files)
 
 
+# Synthetic 0.53-like minifier churn: identical control-flow semantics
+# (darwin early-null, win32 branch carrying sand-window-controls, Linux
+# hidden-null, memo guard) but different identifiers, quote style,
+# declaration keyword/count, and memo slot. A stable semantic matcher must
+# patch this without a new version-specific byte anchor.
+CHURNED_LINUX_CONTROLS = (
+    "if(t==='darwin')return null;if(t==='win32'){let W;"
+    'e[12]===Symbol.for("react.memo_cache_sentinel")?(W={display:"none"},'
+    'e[12]=W):W=e[12];let Y;return e[13]!==w?'
+    '(Y=f.jsx("div",{"aria-hidden":!0,className:"sand-window-controls",'
+    'ref:w,style:W}),e[13]=w,e[14]=Y):Y=e[14],Y}'
+    'if(q)return null;const C,A,E,R,N,U;if(e[16]!==r)'
+)
+
+
+def sample_churned_controls_asar(tool, extra=None):
+    files = {
+        "dist/electron-main/main-core.cjs": MODERN_CORE_UPSTREAM.encode("utf-8"),
+        "dist/electron-main/main-app.cjs": MODERN_RELAUNCH_CONTEXT_UPSTREAM.encode(
+            "utf-8"
+        ),
+        "dist/renderer/assets/index-B7CuLxVI.js": CHURNED_LINUX_CONTROLS.encode(
+            "utf-8"
+        ),
+    }
+    if extra:
+        files.update(extra)
+    return tool.write_asar(files)
+
+
+# Exact real 0.53.0 bytes: every approved patch span below is byte-identical
+# in the x86_64 and aarch64 payloads (verified from both AppImages). The
+# renderer entry bundle moved to a new code-split filename, and the
+# main-process bundles only renamed minified identifiers.
+REAL_053_RENDERER_PATH = "dist/renderer/assets/index-u-dAfXf3.js"
+REAL_053_CONTROLS = (
+    'if(c==="darwin")return null;if(c==="win32"){let q;'
+    'e[12]===Symbol.for("react.memo_cache_sentinel")?(q={display:"none"},'
+    'e[12]=q):q=e[12];let W;return e[13]!==S?'
+    '(W=f.jsx("div",{"aria-hidden":!0,className:"sand-window-controls",'
+    'ref:S,style:q}),e[13]=S,e[14]=W):W=e[14],W}'
+    'if(o)return null;let T,_,E,R,N;if(e[15]!==r)'
+)
+REAL_053_SECOND_INSTANCE = (
+    's=(c,d)=>{let l=Mh(r,d);if(l.length===0){t.focus();return}'
+    'for(let u of l)o.handleCandidate(u,"second-instance")}'
+)
+REAL_053_CLOSE_SUFFIX = (
+    's.on("closed",()=>{Dh.markRendererNotReady()});let c=Ix({window:Nx(s),'
+    'app:{onceBeforeQuit:l=>he.app.once("before-quit",l)}})'
+)
+REAL_053_MENU_PREFIX = "i=new ss.BrowserWindow({...a.windowOptions,"
+REAL_053_SIGTERM = (
+    "var cu=!he.app.isPackaged||he.app.requestSingleInstanceLock();"
+    "cu||he.app.quit();"
+)
+REAL_053_RELAUNCH_CONTEXT = (
+    "hardwareAccelerationEnabledAtLaunch:kjt,relaunchDesktop:()=>{let P="
+    "ne.environment.restartExitCode;if(P!=null){h3(P);return}"
+    "me.app.relaunch(),me.app.quit()},getMachineId:()=>it()"
+)
+REAL_053_CORE_UPSTREAM = (
+    MODERN_LINUX_FRAMELESS
+    + MODERN_WINDOW_CREATE_UPSTREAM.replace("is.BrowserWindow", "ss.BrowserWindow")
+    + REAL_053_SIGTERM
+    + REAL_053_CLOSE_SUFFIX
+    + MODERN_ARM_UPSTREAM
+    + REAL_053_SECOND_INSTANCE
+    + FOCUS_CHAIN
+)
+
+
+def sample_real053_asar(tool, extra=None):
+    """Synthetic ASAR from exact real 0.53.0 spans at exact real paths."""
+    files = {
+        "dist/electron-main/main-core.cjs": REAL_053_CORE_UPSTREAM.encode("utf-8"),
+        "dist/electron-main/main-app.cjs": REAL_053_RELAUNCH_CONTEXT.encode("utf-8"),
+        REAL_053_RENDERER_PATH: REAL_053_CONTROLS.encode("utf-8"),
+    }
+    if extra:
+        files.update(extra)
+    return tool.write_asar(files)
+
+
 class NativeFrameTransformTests(unittest.TestCase):
     def setUp(self):
         self.tool = load_tool()
@@ -466,32 +550,40 @@ class NativeFrameTransformTests(unittest.TestCase):
             self.skipTest(
                 "GROK_BOT_APP_ASAR contains no paths; skipping optional real-ASAR relaunch probe"
             )
-        find = self.tool.RELAUNCH_QUIT_FIND
-        replace = self.tool.RELAUNCH_QUIT_REPLACE
         for path in present:
             with self.subTest(path=path):
                 self.assertTrue(os.path.isfile(path), path)
                 with open(path, "rb") as handle:
                     blob = handle.read()
-                find_count = blob.count(find)
-                replace_count = blob.count(replace)
-                self.assertEqual(len(find), 31)
-                # Vendor original: find once. Already-patched payload: replace
-                # once. Never both, never neither, never duplicates.
-                self.assertEqual(find_count + replace_count, 1, path)
-                self.assertLessEqual(find_count, 1, path)
-                self.assertLessEqual(replace_count, 1, path)
+                # Version-agnostic structural grounding: minified identifiers
+                # churn per release (`ye` vs `me`, `B` vs `P`), so the probe
+                # asserts exactly one in-scope structural occurrence instead
+                # of legacy byte strings.
+                app = self.tool.member_content(
+                    blob, "dist/electron-main/main-app.cjs"
+                )
+                hits = list(
+                    self.tool._RELAUNCH_STRUCTURAL.pattern.finditer(app)
+                )
+                self.assertEqual(len(hits), 1, path)
+                patched = self.tool.apply_native_frame_patches(blob)
+                patched_app = self.tool.member_content(
+                    patched, "dist/electron-main/main-app.cjs"
+                ).decode("utf-8")
+                self.assertEqual(patched_app.count(".app.relaunch()"), 1, path)
+                self.assertIn(".app.exit()", patched_app)
+                self.assertNotRegex(patched_app, r"\.app\.relaunch\(\),[A-Za-z_$][A-Za-z0-9_$]*\.app\.quit\(\)")
 
-    def test_real_asar_uses_exact_anchors_without_fallback_if_available(self):
+    def test_real_asar_patches_without_manual_fallback_if_available(self):
         configured = os.environ.get("GROK_BOT_APP_ASAR", "")
         if not configured:
             self.skipTest(
-                "GROK_BOT_APP_ASAR is not set; skipping optional real-ASAR exact-anchor probe"
+                "GROK_BOT_APP_ASAR is not set; skipping optional real-ASAR patch probe"
             )
         paths = [path for path in configured.split(os.pathsep) if path]
         if not paths:
             self.skipTest(
-                "GROK_BOT_APP_ASAR contains no paths; skipping optional real-ASAR exact-anchor probe"
+                "GROK_BOT_APP_ASAR contains no paths; skipping optional real-ASAR patch probe"
             )
         for path in paths:
             with self.subTest(path=path):
@@ -499,14 +591,23 @@ class NativeFrameTransformTests(unittest.TestCase):
                 with open(path, "rb") as handle:
                     original = handle.read()
                 patched, applied = self.tool._apply_native_frame_rules(original)
+                # Automatic semantic matches are allowed; only explicitly
+                # manual rules still require the diagnostic flag.
                 self.assertFalse(
-                    [entry for entry in applied if entry[3]],
-                    "real pinned ASAR must use exact anchors in normal mode",
+                    [
+                        entry
+                        for entry in applied
+                        if entry[3] and not entry[0].structural_auto
+                    ],
+                    "real ASAR must not require manual fallback in normal mode",
                 )
+                self.assertEqual(len(applied), len(self.tool.NATIVE_PATCH_RULES))
                 self.assertEqual(
                     patched,
                     self.tool.apply_native_frame_patches(original),
                 )
+                self.assertIn(self.tool.WINDOWS_WCO_MARK, patched)
+                self.assertIn(self.tool.MAC_FRAME_MARK, patched)
 
     def test_relaunch_vs_hide_node_probe(self):
         node = shutil.which("node")
@@ -708,18 +809,24 @@ process.stdout.write("relaunch=exit close=!quitting:hide\n");
         self.assertGreater(data_offset, 0)
 
     def test_structural_fallback_rejects_ambiguity_and_near_misses(self):
+        # The controls semantic matcher is automatic: a minifier rename no
+        # longer requires an explicit fallback flag.
         future = sample_future_structural_asar(self.tool)
-        with self.assertRaisesRegex(
-            self.tool.TransformError, "structural fallback disabled"
-        ):
-            self.tool.apply_native_frame_patches(future)
-        patched = self.tool.apply_native_frame_patches(
-            future, allow_structural_fallback=True
-        )
+        patched = self.tool.apply_native_frame_patches(future)
         renderer = self.tool.member_content(
             patched, "dist/renderer/assets/index-B7CuLxVI.js"
         )
         self.assertIn(b"if(1)return null", renderer)
+        # Explicit fallback still works for the automatic controls rule.
+        patched_flag = self.tool.apply_native_frame_patches(
+            future, allow_structural_fallback=True
+        )
+        self.assertEqual(
+            self.tool.member_content(
+                patched_flag, "dist/renderer/assets/index-B7CuLxVI.js"
+            ),
+            renderer,
+        )
 
         for decoy_path in (
             "dist/renderer/assets/index-copy.js",
@@ -740,12 +847,51 @@ process.stdout.write("relaunch=exit close=!quitting:hide\n");
             self.tool,
             extra={
                 "dist/renderer/assets/index-B7CuLxVI.js": MODERN_LINUX_CONTROLS.replace(
-                    "e[15]!==r", "e[14]!==r"
+                    "sand-window-controls", "sand-window-control"
                 ).encode("utf-8")
             },
         )
         with self.assertRaises(self.tool.TransformError):
             self.tool.apply_native_frame_patches(near_miss)
+
+        renamed_second_instance = sample_modern_asar(
+            self.tool,
+            extra={
+                "dist/electron-main/main-core.cjs": MODERN_CORE_UPSTREAM.replace(
+                    "Mh(r,l)", "Qh(r,l)"
+                ).encode("utf-8")
+            },
+        )
+        # Second-instance identifier churn is automatic like the controls.
+        renamed_patched = self.tool.apply_native_frame_patches(
+            renamed_second_instance
+        )
+        renamed_core = self.tool.member_content(
+            renamed_patched, "dist/electron-main/main-core.cjs"
+        ).decode("utf-8")
+        self.assertIn("t.focus();if(d.length!==0)", renamed_core)
+
+        # The quit-arming rule stays manual-only: a renamed app identifier
+        # still requires the explicit diagnostic flag.
+        manual_quit_arm = sample_modern_asar(
+            self.tool,
+            extra={
+                "dist/electron-main/main-core.cjs": MODERN_CORE_UPSTREAM.replace(
+                    ARM_UPSTREAM, ARM_UPSTREAM.replace("he.app", "xe.app")
+                ).encode("utf-8")
+            },
+        )
+        with self.assertRaisesRegex(
+            self.tool.TransformError, "structural fallback disabled"
+        ):
+            self.tool.apply_native_frame_patches(manual_quit_arm)
+        manual_patched = self.tool.apply_native_frame_patches(
+            manual_quit_arm, allow_structural_fallback=True
+        )
+        manual_core = self.tool.member_content(
+            manual_patched, "dist/electron-main/main-core.cjs"
+        ).decode("utf-8")
+        self.assertIn('xe.app.once("before-quit",()=>{xe.app.quitting=!0})', manual_core)
 
         duplicated_relaunch = sample_modern_asar(
             self.tool,
@@ -758,6 +904,202 @@ process.stdout.write("relaunch=exit close=!quitting:hide\n");
         )
         with self.assertRaises(self.tool.TransformError):
             self.tool.apply_native_frame_patches(duplicated_relaunch)
+
+    def test_churned_controls_patched_without_new_anchor(self):
+        # Stable semantic matcher: minifier churn (identifiers, quotes,
+        # declaration keyword/count, memo slot) must not require a new
+        # version-specific byte anchor. Normal packaging succeeds.
+        blob = sample_churned_controls_asar(self.tool)
+        patched = self.tool.apply_native_frame_patches(blob)
+        renderer = self.tool.member_content(
+            patched, "dist/renderer/assets/index-B7CuLxVI.js"
+        )
+        self.assertIn(b"if(1)return null", renderer)
+        self.assertNotIn(b"if(q)return null", renderer)
+        # Windows/macOS chrome and the win32 controls branch are preserved.
+        self.assertIn(b"sand-window-controls", renderer)
+        self.assertIn(b"darwin", renderer)
+        self.assertIn(b"win32", renderer)
+        self.assertIn(b"e[16]!==r", renderer)
+        self.assertIn(b"const C,A,E,R,N,U;", renderer)
+        # Other pinned members still patch through exact anchors.
+        core = self.tool.member_content(
+            patched, "dist/electron-main/main-core.cjs"
+        )
+        self.assertIn(b'{frame:!0,titleBarStyle:"default"}', core)
+        self.assertIn(b"autoHideMenuBar:!0", core)
+        app = self.tool.member_content(
+            patched, "dist/electron-main/main-app.cjs"
+        )
+        self.assertIn(b"me.app.relaunch(),me.app.exit()", app)
+
+    def test_churned_controls_wrong_path_fails_closed(self):
+        blob = sample_churned_controls_asar(
+            self.tool,
+            extra={
+                "dist/renderer/assets/index-B7CuLxVI.js": b"controls moved",
+                "dist/renderer/assets/unrelated.js": CHURNED_LINUX_CONTROLS.encode(
+                    "utf-8"
+                ),
+            },
+        )
+        with self.assertRaises(self.tool.TransformError):
+            self.tool.apply_native_frame_patches(blob)
+
+    def test_controls_without_sand_window_controls_fails_closed(self):
+        # Same darwin/win32/hidden/memo shape but a different className is a
+        # near miss, not the Linux controls occurrence.
+        near_miss = CHURNED_LINUX_CONTROLS.replace(
+            "sand-window-controls", "sand-window-control"
+        )
+        blob = sample_churned_controls_asar(
+            self.tool,
+            extra={"dist/renderer/assets/index-B7CuLxVI.js": near_miss.encode("utf-8")},
+        )
+        with self.assertRaises(self.tool.TransformError):
+            self.tool.apply_native_frame_patches(blob)
+
+    def test_churned_controls_duplicate_occurrence_fails_closed(self):
+        blob = sample_churned_controls_asar(
+            self.tool,
+            extra={
+                "dist/renderer/assets/index-B7CuLxVI.js": (
+                    CHURNED_LINUX_CONTROLS + CHURNED_LINUX_CONTROLS
+                ).encode("utf-8")
+            },
+        )
+        with self.assertRaises(self.tool.TransformError):
+            self.tool.apply_native_frame_patches(blob)
+
+    def test_similarly_shaped_function_without_controls_is_ignored(self):
+        # An irrelevant similarly-shaped function (darwin/win32/hidden/memo
+        # shape, different className) elsewhere must not confuse the matcher
+        # nor be patched. Only the real controls occurrence is rewritten.
+        decoy = CHURNED_LINUX_CONTROLS.replace(
+            "sand-window-controls", "sand-other-widget"
+        )
+        blob = sample_churned_controls_asar(
+            self.tool,
+            extra={"dist/renderer/assets/unrelated.js": decoy.encode("utf-8")},
+        )
+        patched = self.tool.apply_native_frame_patches(blob)
+        renderer = self.tool.member_content(
+            patched, "dist/renderer/assets/index-B7CuLxVI.js"
+        )
+        self.assertIn(b"if(1)return null", renderer)
+        self.assertIn(b"sand-window-controls", renderer)
+        untouched = self.tool.member_content(
+            patched, "dist/renderer/assets/unrelated.js"
+        )
+        self.assertIn(b"sand-other-widget", untouched)
+        self.assertNotIn(b"if(1)return null", untouched)
+
+    def test_real053_shapes_patch_without_new_anchor(self):
+        # Grounded in exact real 0.53.0 spans (byte-identical in x86_64 and
+        # aarch64) at exact real member paths. Normal packaging succeeds:
+        # the code-split entry bundle is followed automatically and every
+        # identifier-only churn is tolerated without new byte anchors.
+        blob = sample_real053_asar(self.tool)
+        patched, applied = self.tool._apply_native_frame_rules(blob)
+        by_rule = {rule.name: (path, fell_back) for rule, path, _, fell_back in applied}
+        self.assertEqual(
+            by_rule["Linux in-content controls"][0], REAL_053_RENDERER_PATH
+        )
+        renderer = self.tool.member_content(patched, REAL_053_RENDERER_PATH)
+        self.assertIn(b"if(1)return null", renderer)
+        self.assertNotIn(b"if(o)return null", renderer)
+        self.assertEqual(renderer.count(b"sand-window-controls"), 1)
+        core = self.tool.member_content(
+            patched, "dist/electron-main/main-core.cjs"
+        ).decode("utf-8")
+        self.assertIn('{frame:!0,titleBarStyle:"default"}', core)
+        self.assertIn("i=new ss.BrowserWindow({...a.windowOptions,autoHideMenuBar:!0,", core)
+        self.assertIn(
+            's.on("close",e=>{he.app.quitting||(e.preventDefault(),s.hide())})',
+            core,
+        )
+        self.assertIn("t.focus();if(l.length!==0)", core)
+        self.assertIn('process.on("SIGTERM",()=>{he.app.quit()})', core)
+        app = self.tool.member_content(
+            patched, "dist/electron-main/main-app.cjs"
+        ).decode("utf-8")
+        self.assertIn("me.app.relaunch(),me.app.exit()", app)
+        self.assertNotIn("me.app.relaunch(),me.app.quit()", app)
+        # Windows/macOS chrome survives the automatic rewrites.
+        rebuilt = self.tool.apply_native_frame_patches(blob)
+        self.assertIn(self.tool.WINDOWS_WCO_MARK, rebuilt)
+        self.assertIn(self.tool.MAC_FRAME_MARK, rebuilt)
+
+    def test_real053_duplicate_entry_bundle_fails_closed(self):
+        # Two versioned entry bundles (stale hash plus new hash) must stay
+        # ambiguous even when only one carries the controls occurrence.
+        blob = sample_real053_asar(
+            self.tool,
+            extra={
+                "dist/renderer/assets/index-AAAAAAAA.js": REAL_053_CONTROLS.encode(
+                    "utf-8"
+                ),
+            },
+        )
+        with self.assertRaises(self.tool.TransformError):
+            self.tool.apply_native_frame_patches(blob)
+
+    def test_real053_wrong_path_fails_closed(self):
+        blob = sample_real053_asar(
+            self.tool,
+            extra={
+                REAL_053_RENDERER_PATH: b"controls moved",
+                "dist/renderer/assets/unrelated.js": REAL_053_CONTROLS.encode(
+                    "utf-8"
+                ),
+            },
+        )
+        with self.assertRaises(self.tool.TransformError):
+            self.tool.apply_native_frame_patches(blob)
+
+    def test_menu_utility_window_shapes_are_rejected(self):
+        # Auditor finding: the prefix-only menu matcher silently patched any
+        # utility window shaped `new <e>.BrowserWindow({...<o>.windowOptions,`.
+        # Only the main window (titled from the app name, with the secure
+        # webPreferences set) may be rewritten.
+        utilities = {
+            "bare options": "u=new q.BrowserWindow({...q.windowOptions,foo:1})",
+            "titled utility": (
+                "u=new q.BrowserWindow({...q.windowOptions,title:\"Utility\","
+                "backgroundColor:\"#fff\",foo:1})"
+            ),
+        }
+        for name, utility in utilities.items():
+            with self.subTest(name):
+                core = MODERN_CORE_UPSTREAM.replace(
+                    MODERN_WINDOW_CREATE_UPSTREAM, utility
+                )
+                blob = sample_modern_asar(
+                    self.tool,
+                    extra={
+                        "dist/electron-main/main-core.cjs": core.encode("utf-8")
+                    },
+                )
+                with self.assertRaises(self.tool.TransformError):
+                    self.tool.apply_native_frame_patches(blob)
+        # A bare utility next to the real main window blocks nothing and is
+        # left untouched while the real window is patched.
+        core = MODERN_CORE_UPSTREAM.replace(
+            MODERN_WINDOW_CREATE_UPSTREAM,
+            MODERN_WINDOW_CREATE_UPSTREAM + utilities["bare options"],
+        )
+        blob = sample_modern_asar(
+            self.tool,
+            extra={"dist/electron-main/main-core.cjs": core.encode("utf-8")},
+        )
+        patched = self.tool.apply_native_frame_patches(blob)
+        patched_core = self.tool.member_content(
+            patched, "dist/electron-main/main-core.cjs"
+        ).decode("utf-8")
+        self.assertIn("autoHideMenuBar:!0", patched_core)
+        self.assertIn(
+            "u=new q.BrowserWindow({...q.windowOptions,foo:1})", patched_core
+        )
 
     def test_renderer_exact_decoy_and_modern_structural_match_are_ambiguous(self):
         decoy_path = "dist/renderer/assets/unrelated.js"
@@ -855,16 +1197,26 @@ process.stdout.write("relaunch=exit close=!quitting:hide\n");
         self.assertIn("usage:", stderr.getvalue())
 
     def test_cli_requires_explicit_structural_fallback_and_audits_it(self):
-        blob = sample_future_structural_asar(self.tool)
+        # Only non-automatic rules still gate the flag: use a quit-arming
+        # rename for the manual gate. Churned automatic rules are covered by
+        # test_cli_audits_automatic_controls_match below.
+        manual_blob = sample_modern_asar(
+            self.tool,
+            extra={
+                "dist/electron-main/main-core.cjs": MODERN_CORE_UPSTREAM.replace(
+                    ARM_UPSTREAM, ARM_UPSTREAM.replace("he.app", "xe.app")
+                ).encode("utf-8")
+            },
+        )
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "app.asar")
             with open(path, "wb") as handle:
-                handle.write(blob)
+                handle.write(manual_blob)
             stderr = io.StringIO()
             with redirect_stderr(stderr):
                 self.assertEqual(self.tool.main([path]), 1)
             with open(path, "rb") as handle:
-                self.assertEqual(handle.read(), blob)
+                self.assertEqual(handle.read(), manual_blob)
             self.assertIn("--allow-structural-fallback", stderr.getvalue())
             self.assertIn("structural fallback", stderr.getvalue())
 
@@ -876,7 +1228,25 @@ process.stdout.write("relaunch=exit close=!quitting:hide\n");
             self.assertIn("structural fallback:", stderr.getvalue())
             with open(path, "rb") as handle:
                 patched = handle.read()
+        self.assertNotEqual(patched, manual_blob)
+
+    def test_cli_audits_automatic_controls_match(self):
+        blob = sample_future_structural_asar(self.tool)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "app.asar")
+            with open(path, "wb") as handle:
+                handle.write(blob)
+            stderr = io.StringIO()
+            with redirect_stderr(stderr):
+                self.assertEqual(self.tool.main([path]), 0)
+            self.assertIn("structural fallback:", stderr.getvalue())
+            with open(path, "rb") as handle:
+                patched = handle.read()
         self.assertNotEqual(patched, blob)
+        renderer = self.tool.member_content(
+            patched, "dist/renderer/assets/index-B7CuLxVI.js"
+        )
+        self.assertIn(b"if(1)return null", renderer)
 
     def test_manifest_keeps_helper_and_wrapper_forwarding(self):
         runner = load_runner_tests()
