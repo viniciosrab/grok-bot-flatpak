@@ -47,12 +47,12 @@ modules:
     sources:
       - type: file
         only-arches: [x86_64]
-        url: https://downloads.cursor.com/grokbot/stable/b4d3f3b656b57c91705c69d2aea9dd31d6428748/linux/x64/Grok_Bot_0.55.0.AppImage
-        sha256: cef1c17d92ae92a18b727538af49ab3a07bbc7baae861ca355f3e39868753570
+        url: https://downloads.cursor.com/grokbot/stable/b938fe7791be84ce088d4a9a95332601710ba469/linux/x64/Grok_Bot_0.56.1.AppImage
+        sha256: 1e24ad112f073e750b022d60bcc860404c769d15d95c2b36cef82918d69c41ef
       - type: file
         only-arches: [aarch64]
-        url: https://downloads.cursor.com/grokbot/stable/b4d3f3b656b57c91705c69d2aea9dd31d6428748/linux/arm64/Grok_Bot_0.55.0.AppImage
-        sha256: 5659df76e232f023985b4397fa0358816f26de32ace69147aa9ce428205aa99e
+        url: https://downloads.cursor.com/grokbot/stable/b938fe7791be84ce088d4a9a95332601710ba469/linux/arm64/Grok_Bot_0.56.1.AppImage
+        sha256: e0a34a24ff0bbf41ed8db38216587a3a0fe2ea1d585ae582e2eb3d5583cbdd83
       - type: file
         path: data/io.github.viniciosrab.GrokBot.desktop
       - type: file
