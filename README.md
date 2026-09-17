@@ -72,7 +72,7 @@ flatpak remote-delete --user grok-bot
 |-------|-------------|
 | Architectures | `x86_64` and `aarch64` |
 | Sessions | Wayland and X11 |
-| Tray integration | Follows the KDE StatusNotifier standard; fullest experience on KDE Plasma |
+| Tray requirement | A StatusNotifier host is required. Without one, the application will not start. KDE Plasma provides this natively; other desktops may require an extension or additional integration. |
 | Runtime | KDE Platform 6.11, fetched from Flathub |
 | Link handling | `grokbot:` and `sand:` links open in the application |
 
