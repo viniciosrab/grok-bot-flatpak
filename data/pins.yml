@@ -3,14 +3,14 @@
 # Rewritten by the pin job; do not edit by hand. Digests are
 # CI-computed SHA-256 integrity pins, not vendor attestation.
 
-version: 0.56.1
-commitSha: b938fe7791be84ce088d4a9a95332601710ba469
+version: 0.57.0
+commitSha: e2a92373dfe134d2ce44b3672469f8482dd3fca7
 architectures:
   x86_64:
     feed: https://api2.cursor.sh/updates/api/download/stable/linux-x64/sand
-    url: https://downloads.cursor.com/grokbot/stable/b938fe7791be84ce088d4a9a95332601710ba469/linux/x64/Grok_Bot_0.56.1.AppImage
-    sha256: 1e24ad112f073e750b022d60bcc860404c769d15d95c2b36cef82918d69c41ef
+    url: https://downloads.cursor.com/grokbot/stable/e2a92373dfe134d2ce44b3672469f8482dd3fca7/linux/x64/Grok_Bot_0.57.0.AppImage
+    sha256: 295d5a1b2ed48e26616565eeca728e3fc1301238c16cd4826a096ef35e53dd6c
   aarch64:
     feed: https://api2.cursor.sh/updates/api/download/stable/linux-arm64/sand
-    url: https://downloads.cursor.com/grokbot/stable/b938fe7791be84ce088d4a9a95332601710ba469/linux/arm64/Grok_Bot_0.56.1.AppImage
-    sha256: e0a34a24ff0bbf41ed8db38216587a3a0fe2ea1d585ae582e2eb3d5583cbdd83
+    url: https://downloads.cursor.com/grokbot/stable/e2a92373dfe134d2ce44b3672469f8482dd3fca7/linux/arm64/Grok_Bot_0.57.0.AppImage
+    sha256: 201222523a9957085e675f102c0ea806932bbe320793a7b5b1c78ad2967ff937
